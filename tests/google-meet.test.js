@@ -42,6 +42,7 @@ test('Google OAuth requests only Meet-created scope with PKCE and stores encrypt
   assert.equal(restored.connected('owner'), true);
   assert.equal((await f.service.createMeeting('owner')).url, 'https://meet.google.com/abc-defg-hij');
   assert.equal(f.calls.at(-1).request.url, 'https://meet.googleapis.com/v2/spaces');
+  assert.deepEqual(f.calls.at(-1).request.data, { config: { accessType: 'OPEN' } });
   assert.equal(f.calls.at(-1).request.retry, false);
 });
 

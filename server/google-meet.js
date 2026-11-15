@@ -117,7 +117,7 @@ export function createGoogleMeetService({ db, now = () => new Date(), config = g
       run('UPDATE google_meet_connections SET credentials=?,updated_at=? WHERE user_id=? AND version=?', encrypt(credentials, userId), stamp(), userId, row.version);
     });
     try {
-      const response = await auth.request({ url: 'https://meet.googleapis.com/v2/spaces', method: 'POST', data: {}, timeout: 20000, retry: false });
+      const response = await auth.request({ url: 'https://meet.googleapis.com/v2/spaces', method: 'POST', data: { config: { accessType: 'OPEN' } }, timeout: 20000, retry: false });
       return { url: response.data?.meetingUri, spaceName: response.data?.name };
     } catch (error) {
       if (error?.response?.data?.error === 'invalid_grant' || error?.response?.status === 401) run('DELETE FROM google_meet_connections WHERE user_id=? AND version=?', userId, row.version);

@@ -28,10 +28,14 @@ Production HTTPS also needs `APP_ORIGIN` set to the exact public origin and secu
 
 1. Open the same application URL as the rest of your squad and enter the squad workspace.
 2. One member selects **Connect Google to organize** and authorizes the limited Meet permission in Google.
-3. Each member selects **I'm ready** under the nearest meeting and confirms they are ready to join now.
-4. When all current members are ready, the server creates and saves one conference. Everyone automatically navigates to that same Meet URL in the current tab. Returning to the app does not repeatedly redirect the same tab; **Join Google Meet** remains available.
+3. Each member selects **I'm ready** under the nearest meeting and confirms they are ready to join now. Confirmation opens a separate waiting tab and keeps the squad workspace open.
+4. When all current members are ready, the server creates and saves one conference. The waiting tab automatically opens that same Meet URL. Close the Meet tab after the call to return to the existing squad workspace. If the browser blocks the new tab, use the visible meeting button to open it manually.
+
+Google Meet does not send its **Leave call** event to Learning Squads. The site does not claim to detect that action or redirect the Google page after the call. Keeping the workspace open in the original tab provides the return path.
 
 Members can withdraw readiness while waiting. A new member must confirm independently. Each meeting has separate readiness. Provider errors remain visible and can be retried; Google credentials never go to other squad members.
+
+New conferences explicitly use Google's **Open** access mode so participants with the Meet link can enter without requesting admission. This means anyone who receives the link can join, not only Learning Squads members. The application still reveals the upcoming meeting link only to current members after everyone confirms readiness. Other Google host and organization policies remain in effect; the app does not change them. See [Google meeting access settings](https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces#SpaceConfig).
 
 ## Temporary preview and testing limits
 

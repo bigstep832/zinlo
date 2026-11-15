@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useId, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MeetingReadiness, MeetingJoinLink, useMeetingAccess } from './meeting-access.jsx';
+import { MeetingReadiness, MeetingJoinLink, MeetingWaitingRoom, useMeetingAccess } from './meeting-access.jsx';
 import './styles.css';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -66,7 +66,7 @@ function App() {
   }
   const trackName = id => boot?.tracks?.find(t => t.id === id)?.title || id;
   return <><a className="skip-link" href="#main">Skip to content</a><header><div className="header-inner"><a className="brand" href="/" onClick={e => { e.preventDefault(); go('/'); }}>Learning Squads</a><nav aria-label="Main navigation">{boot?.matchmaking?.status === 'waiting' && <a href="/matches" onClick={e => { e.preventDefault(); go('/matches'); }}>My search</a>}{boot?.currentSquadId && <a href={`/squads/${boot.currentSquadId}`} onClick={e => { e.preventDefault(); go(`/squads/${boot.currentSquadId}`); }}>My squad</a>}{boot?.user ? <><button className="text-button" onClick={() => setDialog('history')}>History</button><button onClick={() => setDialog('profile')}>{boot.user.name || 'Guest'} · Profile</button></> : <button disabled={busy || !boot} onClick={() => start()}>Find my squad</button>}</nav></div></header>
-    <main id="main"><Notice error>{error}</Notice>{!boot ? error ? <button onClick={() => { setError(''); refresh().catch(e => setError(e.message)); }}>Retry connection</button> : <Loading>Connecting to Learning Squads…</Loading> : path === '/' ? <Home tracks={boot.tracks} start={start} busy={busy} /> : path === '/start' ? <Onboarding boot={boot} onSaved={async ({ startSearch } = {}) => { if (startSearch) await api('/matchmaking', 'POST', {}); const data = await refresh(); go(startSearch ? '/matches' : data.currentSquadId ? `/squads/${data.currentSquadId}` : '/matches'); }} createSession={async () => { const data = await api('/session', 'POST', {}); setBoot(data); }} /> : path === '/matches' ? <Matches boot={boot} go={go} refresh={refresh} /> : /^\/squads\/[^/]+$/.test(path) ? <Dashboard key={path} id={path.split('/')[2]} boot={boot} refreshBoot={refresh} go={go} /> : <section className="panel"><h1>Page not found</h1><button onClick={() => go('/')}>Go home</button></section>}</main>
+    <main id="main"><Notice error>{error}</Notice>{!boot ? error ? <button onClick={() => { setError(''); refresh().catch(e => setError(e.message)); }}>Retry connection</button> : <Loading>Connecting to Learning Squads…</Loading> : path === '/' ? <Home tracks={boot.tracks} start={start} busy={busy} /> : path === '/start' ? <Onboarding boot={boot} onSaved={async ({ startSearch } = {}) => { if (startSearch) await api('/matchmaking', 'POST', {}); const data = await refresh(); go(startSearch ? '/matches' : data.currentSquadId ? `/squads/${data.currentSquadId}` : '/matches'); }} createSession={async () => { const data = await api('/session', 'POST', {}); setBoot(data); }} /> : path === '/matches' ? <Matches boot={boot} go={go} refresh={refresh} /> : /^\/squads\/[^/]+\/meetings\/[^/]+\/wait$/.test(path) ? <Dashboard key={path} id={path.split('/')[2]} waitingMeetingId={path.split('/')[4]} boot={boot} refreshBoot={refresh} go={go} /> : /^\/squads\/[^/]+$/.test(path) ? <Dashboard key={path} id={path.split('/')[2]} boot={boot} refreshBoot={refresh} go={go} /> : <section className="panel"><h1>Page not found</h1><button onClick={() => go('/')}>Go home</button></section>}</main>
     <footer><span>Learning Squads · Four weeks, one personal project.</span><span>Peer learning. No instructor. No automatic renewal.</span></footer>
     {dialog === 'profile' && <Modal title="Your profile" onClose={() => setDialog(null)}><ProfileForm boot={boot} editing onSaved={async () => { const data = await refresh(); setDialog(null); if (path === '/matches') { go('/start'); go('/matches'); } else if (path.startsWith('/squads/') && !data.currentSquadId) go('/matches'); }} /></Modal>}
     {dialog === 'history' && <Modal title="Sprint history" onClose={() => setDialog(null)}>{boot.history?.length ? <div className="stack">{boot.history.map(s => <article className="panel" key={s.id}><div className="row"><h3>{s.name || trackName(s.trackId)}</h3><Badge status={s.status} /></div><p>{dateText(s.startDate, boot.user?.timezone)} – {dateText(s.endDate, boot.user?.timezone)}</p><button onClick={() => go(`/squads/${s.id}`)}>Open sprint</button></article>)}</div> : <p>Your completed, closed and previous sprints will appear here.</p>}<p className="muted">History stays with this browser’s guest session.</p></Modal>}
@@ -204,7 +204,7 @@ function Matches({ boot, go, refresh }) {
   </div>;
 }
 
-function Dashboard({ id, boot, refreshBoot, go }) {
+function Dashboard({ id, boot, refreshBoot, go, waitingMeetingId = null }) {
   const [data, setData] = useState(null); const [tab, setTab] = useState('overview'); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false); const [leaving, setLeaving] = useState(false); const [meeting, setMeeting] = useState(null);
   const [pollError, setPollError] = useState('');
   const [receivedAt, setReceivedAt] = useState(0);
@@ -263,12 +263,13 @@ function Dashboard({ id, boot, refreshBoot, go }) {
     }
     return () => { mountedRef.current = false; readVersion.current++; readRef.current?.abort(); for (const controller of mutations.current) controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', poll); };
   }, [id, load]);
-  const meetingAccess = useMeetingAccess({ squadId: id, data, receivedAt, change, suspended: busy || leaving });
+  const meetingAccess = useMeetingAccess({ squadId: id, data, receivedAt, change, suspended: busy || leaving, waitingMeetingId });
   async function leave() { setBusy(true); setError(''); try { await api(`/squads/${id}/leave`, 'POST', {}); await refreshBoot(); go('/matches'); } catch (e) { setError(e.message); setLeaving(false); } finally { setBusy(false); } }
   async function adapt() { setBusy(true); setError(''); setNotice(''); try { const result = await api(`/squads/${id}/adapt`, 'POST', {}); setNotice(result.message || (result.source === 'ai' ? 'Your adapted plan has been saved.' : 'The base plan is still available.')); await load(); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   if (!data) return <><Notice error>{error}</Notice>{error ? <div className="actions"><button onClick={() => { setError(''); load().catch(e => setError(e.message)); }}>Retry</button><button onClick={() => go('/')}>Go home</button></div> : <Loading>Loading your squad…</Loading>}</>;
   const { squad, plan, meetings, members, progress, canEdit } = data;
   const zone = boot.user?.timezone || detectedZone; const track = boot.tracks.find(t => t.id === squad.trackId);
+  if (waitingMeetingId) return <><Notice error>{pollError}</Notice><MeetingWaitingRoom access={meetingAccess} Modal={Modal} onBack={() => go(`/squads/${id}`)} timeLabel={meetingAccess.nextMeeting ? dateText(meetingAccess.nextMeeting.startsAt, zone, true) : ''} /></>;
   const tasks = plan.weeks.flatMap(w => w.tasks); const done = progress.filter(p => p.status === 'done').length;
   const nextMeeting = meetings.find(m => new Date(m.endsAt).getTime() > Date.now()); const nextTask = tasks.find(t => !progress.some(p => p.taskId === t.id && p.status === 'done'));
   const working = progress.some(p => p.status !== 'not_started' || p.note || p.url) || data.teamProgress?.some(p => p.results?.some(r => r.status !== 'not_started' || r.note || r.url));
