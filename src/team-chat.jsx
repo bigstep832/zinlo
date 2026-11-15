@@ -1,4 +1,7 @@
+import { Avatar } from './avatar.jsx';
 import React, { useEffect, useRef, useState } from 'react';
+import { Send, LoaderCircle } from 'lucide-react';
+import './team-chat.css';
 
 export function TeamChat({ squadId, selfId, api, active, canSend, isMember }) {
   const [messages, setMessages] = useState([]), [draft, setDraft] = useState('');
@@ -75,10 +78,13 @@ export function TeamChat({ squadId, selfId, api, active, canSend, isMember }) {
       <div className="chat-history" ref={list} onScroll={() => { const el = list.current; nearEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
         {more && <button className="text-button" disabled={older} onClick={loadOlder}>{older ? 'Loading…' : 'Load earlier messages'}</button>}
         {loading ? <p role="status">Loading your conversation…</p> : !messages.length && <div className="chat-empty"><h3>Start the conversation.</h3><p>Say hello and tell your squad what you would like to learn.</p></div>}
-        <ol className="chat-messages" aria-label="Team messages" aria-live="polite" aria-relevant="additions">{messages.map(message => <li key={message.id} className={message.userId === selfId ? 'message-self' : ''}><div className="message-meta"><strong>{message.userId === selfId ? 'You' : message.name}</strong><time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</time></div><p className="message-text">{message.text}</p></li>)}</ol>
+        <ol className="chat-messages" aria-label="Team messages" aria-live="polite" aria-relevant="additions">{messages.map(message => <li key={message.id} className={message.userId === selfId ? 'message-self' : ''}><div className="message-meta"><Avatar name={message.name} src={message.avatarUrl} size={24}/><strong>{message.userId === selfId ? 'You' : message.name}</strong><time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</time></div><p className="message-text">{message.text}</p></li>)}</ol>
       </div>
       {error && <p className="notice error" role="alert">{error}</p>}
-      {canSend ? <form className="chat-compose" onSubmit={send}><label htmlFor="team-message">Message your squad<textarea id="team-message" rows={3} maxLength={2000} value={draft} onChange={e => setDraft(e.target.value)} placeholder="Write a message…" onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') send(e); }} /></label><div className="row"><small className="muted">{draft.length}/2000 · Ctrl+Enter to send</small><button className="primary" disabled={busy || !draft.trim()}>{busy ? 'Sending…' : 'Send message'}</button></div></form> : <p className="muted">This sprint has ended. Your conversation is read-only.</p>}
+      {canSend ? <form className="chat-compose" onSubmit={send}>
+        <label htmlFor="team-message">Message your squad<textarea id="team-message" rows={3} maxLength={2000} value={draft} onChange={e => setDraft(e.target.value)} placeholder="Write a message…" aria-describedby="chat-send-hint" onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) { e.preventDefault(); send(e); } }} /></label>
+        <div className="chat-compose-footer"><div><small id="chat-send-hint">Enter to send · Shift+Enter for a new line</small><small>{draft.length}/2000</small></div><button type="submit" className="chat-send" disabled={busy || !draft.trim()} aria-label={busy ? 'Sending message' : 'Send message'} title={busy ? 'Sending…' : 'Send message'}>{busy ? <LoaderCircle className="chat-send-spinner" size={19} aria-hidden="true" /> : <Send size={19} strokeWidth={1.8} aria-hidden="true" />}</button></div>
+      </form> : <p className="muted">This sprint has ended. Your conversation is read-only.</p>}
     </div>
   </section>;
 }

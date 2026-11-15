@@ -1,4 +1,6 @@
 import http from 'node:http';
+import sharp from 'sharp';
+import { searchCities } from './locations.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -71,6 +73,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   const db = new DatabaseSync(dbPath);
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, profile TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS user_avatars (user_id TEXT PRIMARY KEY REFERENCES users(id), image BLOB NOT NULL, version TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS squads (id TEXT PRIMARY KEY, name TEXT NOT NULL, track_id TEXT NOT NULL, level TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sprints (id TEXT PRIMARY KEY, squad_id TEXT UNIQUE NOT NULL REFERENCES squads(id), status TEXT NOT NULL, starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, timezone TEXT NOT NULL, plan TEXT NOT NULL);
@@ -117,6 +120,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   transaction(() => {
     const columns = new Set(all('PRAGMA table_info(squads)').map(column => column.name));
     if (!columns.has('display_number')) db.exec('ALTER TABLE squads ADD COLUMN display_number INTEGER');
+    if (!columns.has('learning_mode')) db.exec("ALTER TABLE squads ADD COLUMN learning_mode TEXT NOT NULL DEFAULT 'squad'");
     if (!columns.has('auto_matched')) db.exec('ALTER TABLE squads ADD COLUMN auto_matched INTEGER NOT NULL DEFAULT 0');
     let next = q('SELECT COALESCE(MAX(display_number),0) AS n FROM squads').n;
     for (const squad of all('SELECT id,track_id,display_number FROM squads ORDER BY created_at,id')) {
@@ -163,6 +167,13 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       for (const sprint of all("SELECT * FROM sprints WHERE status IN ('forming','ready','active')")) {
         const count = q('SELECT COUNT(*) AS n FROM memberships WHERE squad_id = ? AND active = 1', sprint.squad_id).n;
         let status = sprint.status;
+        if (q('SELECT learning_mode FROM squads WHERE id=?', sprint.squad_id).learning_mode === 'solo') {
+          if (!count) status = 'closed';
+          else if (time >= sprint.ends_at) status = 'completed';
+          else status = 'active';
+          if (status !== sprint.status) run('UPDATE sprints SET status=? WHERE id=?', status, sprint.id);
+          continue;
+        }
         if (status !== 'active') status = count >= 3 ? 'ready' : 'forming';
         if (status !== 'active' && (count === 0 || time >= sprint.starts_at)) status = count >= 3 ? 'active' : 'closed';
         if (status === 'active' && time >= sprint.ends_at) status = 'completed';
@@ -170,9 +181,10 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       }
     });
   }
+  function avatarUrl(userId) { const saved = q('SELECT version FROM user_avatars WHERE user_id=?', userId); return saved ? `/api/avatars/${userId}?v=${saved.version}` : null; }
   function profile(userId) {
     const row = q('SELECT profile FROM users WHERE id = ?', userId);
-    return row ? { ...JSON.parse(row.profile), id: userId } : null;
+    return row ? { ...JSON.parse(row.profile), id: userId, avatarUrl: avatarUrl(userId) } : null;
   }
   function userFromRequest(req) {
     const cookie = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('ls_session='));
@@ -203,12 +215,12 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return all('SELECT m.*,u.profile AS organizer_profile FROM meetings m LEFT JOIN users u ON u.id = m.organizer_id WHERE m.sprint_id = ? ORDER BY m.starts_at', sprintId).map(m => ({ id: m.id, startsAt: m.starts_at, endsAt: m.ends_at, windowEndsAt: m.window_ends_at, topic: m.topic, week: m.week, ...(privateFields ? { meetUrl: m.meet_url, organizerName: m.organizer_profile ? JSON.parse(m.organizer_profile).name : null } : {}) }));
   }
   function members(squadId, includeFormer = false, selfId = null) {
-    return all(`SELECT m.*,u.profile FROM memberships m JOIN users u ON m.user_id=u.id WHERE m.squad_id = ? ${includeFormer ? '' : 'AND m.active = 1'} ORDER BY m.joined_at,m.user_id`, squadId).map(m => ({ id: m.user_id, name: JSON.parse(m.profile).name, ...(includeFormer ? { active: !!m.active, isSelf: m.user_id === selfId } : {}) }));
+    return all(`SELECT m.*,u.profile FROM memberships m JOIN users u ON m.user_id=u.id WHERE m.squad_id = ? ${includeFormer ? '' : 'AND m.active = 1'} ORDER BY m.joined_at,m.user_id`, squadId).map(m => ({ id: m.user_id, name: JSON.parse(m.profile).name, avatarUrl: avatarUrl(m.user_id), ...(includeFormer ? { active: !!m.active, isSelf: m.user_id === selfId } : {}) }));
   }
   function summary(row) {
     const roster = members(row.id);
     const name = `${trackById(row.track_id).title} #${String(row.display_number).padStart(3, '0')}`;
-    return { id: row.id, name, number: row.display_number, trackId: row.track_id, level: row.level, status: row.status, memberCount: roster.length, capacity: 4, members: roster, meetings: meetingRows(row.sprint_id), startDate: row.starts_at, endDate: row.ends_at };
+    return { id: row.id, learningMode: row.learning_mode || 'squad', name, number: row.display_number, trackId: row.track_id, level: row.level, status: row.status, memberCount: roster.length, capacity: 4, members: roster, meetings: meetingRows(row.sprint_id), startDate: row.starts_at, endDate: row.ends_at };
   }
   function bootstrap(user) {
     const currentSquadId = user ? current(user.id) : null;
@@ -325,7 +337,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const answers = JSON.parse(saved.answers), quiz = plan.weeks.flatMap(week => week.tasks).find(task => task.id === saved.task_id)?.quiz;
       return { taskId: saved.task_id, answers, score: saved.score, total: saved.total, passed: !!saved.passed, attempts: saved.attempts, updatedAt: saved.updated_at, feedback: quiz ? gradeQuiz(quiz, answers)?.feedback || [] : [] };
     });
-    return planAccess({ plan, progress: results(row.sprint_id, userId, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), quizResults, assignments: assignmentResults(row.sprint_id, userId), credits: all('SELECT item_id FROM learning_credits WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(item => item.item_id), now: now(), canEdit });
+    return planAccess({ plan, progress: results(row.sprint_id, userId, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status, learningMode: row.learning_mode }, meetings: meetingRows(row.sprint_id), quizResults, assignments: assignmentResults(row.sprint_id, userId), credits: all('SELECT item_id FROM learning_credits WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(item => item.item_id), now: now(), canEdit });
   }
   function meetingOrganizer(squadId) {
     return members(squadId).find(member => !!meetAdapter || googleMeet.connected(member.id))?.id || null;
@@ -352,6 +364,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   }
   function canJoin(user, row) {
     requireActiveTrack(row.track_id);
+    if (row.learning_mode === 'solo' || user.learningMode === 'solo') throw new AppError(409, 'Choose squad learning before joining a team.', 'solo_course');
     if (!['forming', 'ready'].includes(row.status) || row.starts_at <= stamp()) throw new AppError(409, 'Recruitment has closed for this squad.', 'recruitment_closed');
     if (members(row.id).length >= 4) throw new AppError(409, 'This squad just filled up. Search for another squad.', 'squad_full');
     if (user.trackId !== row.track_id || user.level !== row.level || scheduleConflicts(user, meetingRows(row.sprint_id)).length) throw new AppError(409, 'This squad does not fit your track, level, or all eight meeting windows.', 'incompatible_schedule');
@@ -378,6 +391,24 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const method = req.method;
     const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
     if (mutation) validateOrigin(req);
+    if (pathname === '/api/profile/avatar' && method === 'PUT') {
+      const owner = requireUser(userFromRequest(req), false);
+      rate(`avatar:${owner.id}`, 12, 3600000);
+      if (!['image/jpeg','image/png','image/webp'].includes(req.headers['content-type'])) throw new AppError(415, 'Choose a JPEG, PNG or WebP photo.', 'invalid_image');
+      const chunks = []; let length = 0;
+      for await (const chunk of req) { length += chunk.length; if (length > 2 * 1024 * 1024) throw new AppError(413, 'Choose a smaller photo.', 'too_large'); chunks.push(chunk); }
+      let image;
+      try {
+        const input = sharp(Buffer.concat(chunks), { limitInputPixels: 16000000 });
+        const meta = await input.metadata();
+        if (!['jpeg','png','webp'].includes(meta.format) || (meta.pages || 1) > 1) throw new Error('Unsupported image');
+        image = await input.rotate().resize(256,256,{fit:'cover'}).webp({quality:80}).toBuffer();
+      } catch { fail('This photo could not be read. Choose a JPEG, PNG or WebP image.', 'invalid_image'); }
+      // Recheck the session after an asynchronous decode; never retain original bytes or metadata.
+      if (userFromRequest(req)?.id !== owner.id) throw new AppError(401, 'Your session has expired.', 'session_required');
+      run('INSERT INTO user_avatars VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET image=excluded.image,version=excluded.version', owner.id, image, hash(image).slice(0,16));
+      return json(res,200,{avatarUrl:avatarUrl(owner.id)});
+    }
     const data = mutation ? await body(req) : null;
     // Resolve state only after consuming the body: other requests may have changed
     // the profile, membership, or lifecycle while a slow upload was in flight.
@@ -403,6 +434,34 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, bootstrap(user));
     }
     requireUser(user, false);
+    if (method === 'GET' && pathname === '/api/cities') {
+      rate(`cities:${user.id}`, 90, 60000);
+      return json(res,200,{cities:searchCities(new URL(req.url,'http://localhost').searchParams.get('q') || '')});
+    }
+    if (method === 'DELETE' && pathname === '/api/profile/avatar') { run('DELETE FROM user_avatars WHERE user_id=?',user.id); return json(res,200,{avatarUrl:null}); }
+    const avatar = pathname.match(/^\/api\/avatars\/([a-f0-9-]+)$/);
+    if (method === 'GET' && avatar) {
+      const owner = avatar[1];
+      if (owner !== user.id && !q('SELECT 1 FROM memberships a JOIN memberships b ON a.squad_id=b.squad_id WHERE a.user_id=? AND b.user_id=? AND a.active=1 AND b.active=1',owner,user.id)) throw new AppError(403,'This photo is private.','forbidden');
+      const saved = q('SELECT image FROM user_avatars WHERE user_id=?',owner);
+      if (!saved) throw new AppError(404,'Photo not found.','not_found');
+      res.writeHead(200,{'content-type':'image/webp','cache-control':'private, no-store','x-content-type-options':'nosniff'}); return res.end(Buffer.from(saved.image));
+    }
+    if (method === 'POST' && pathname === '/api/solo') {
+      requireUser(user); requireActiveTrack(user.trackId);
+      const squadId = transaction(() => {
+        if (current(user.id)) throw new AppError(409,'You already have an unfinished course.','active_squad');
+        if (user.learningMode !== 'solo') fail('Choose independent learning in your profile.');
+        rate(`solo:${user.id}`,5,3600000);
+        const start = stamp();
+        const schedule = { startDate:start, endDate:new Date(now().getTime()+28*86400000).toISOString(), meetings:[] };
+        const created = createSquadRecord(user,schedule,[user.id]);
+        run("UPDATE squads SET learning_mode='solo' WHERE id=?",created);
+        run("UPDATE sprints SET status='active' WHERE squad_id=?",created);
+        return created;
+      });
+      return json(res,201,{squadId});
+    }
     if (method === 'POST' && pathname === '/api/google-meet/connect') {
       if (typeof data.squadId !== 'string') fail('Choose your squad before connecting Google Meet.');
       authorizeMember(data.squadId, user, true);
@@ -425,7 +484,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const [, squadId, action] = chatRoute;
       const { row, membership } = authorizeMember(squadId, user, method === 'POST');
       if (!membership.active) throw new AppError(403, 'Chat is only available to current squad members.', 'forbidden');
-      const message = saved => ({ id: saved.id, userId: saved.user_id, name: profile(saved.user_id).name, text: saved.text, createdAt: saved.created_at, clientId: saved.user_id === user.id ? saved.client_id : undefined });
+      const message = saved => ({ id: saved.id, userId: saved.user_id, name: profile(saved.user_id).name, avatarUrl: avatarUrl(saved.user_id), text: saved.text, createdAt: saved.created_at, clientId: saved.user_id === user.id ? saved.client_id : undefined });
       if (method === 'GET' && !action) {
         const params = new URL(req.url, 'http://localhost').searchParams;
         const before = params.get('before'), after = params.get('after');
@@ -538,6 +597,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
         } else if (existing?.state === 'waiting') {
           run('UPDATE matchmaking_queue SET expires_at=? WHERE user_id=?', expiresAt, user.id);
         } else {
+          if (user.learningMode === 'solo') fail('Use independent checkout to start your course.', 'solo_course');
           rate(`search:${user.id}`, 30, 3600000);
           run("INSERT INTO matchmaking_queue(user_id,state,queued_at,expires_at) VALUES (?,'waiting',?,?) ON CONFLICT(user_id) DO UPDATE SET state='waiting',queued_at=excluded.queued_at,expires_at=excluded.expires_at", user.id, stamp(), expiresAt);
         }
@@ -552,6 +612,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
         const next = validateProfile(data, { allowedArchivedTrackId: activeId ? squadRow(activeId).track_id : undefined });
         if (activeId) {
           const active = squadRow(activeId);
+          if ((next.learningMode || 'squad') !== active.learning_mode) throw new AppError(409, 'Finish or leave your current course before changing its format.', 'active_squad');
           if (active.track_id !== next.trackId || active.level !== next.level) throw new AppError(409, 'Leave your current squad before changing track or level.', 'active_squad');
           const conflicts = scheduleConflicts(next, meetingRows(active.sprint_id));
           if (conflicts.length && data.confirmConflict !== true) throw new AppError(409, 'Your new availability conflicts with the existing squad schedule. Keep the commitment explicitly or leave the squad.', 'schedule_conflict', { conflicts });
@@ -573,6 +634,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (method === 'POST' && pathname === '/api/squads/preview') {
       requireUser(user);
       requireActiveTrack(user.trackId);
+      if (user.learningMode === 'solo') fail('Independent courses do not have squad meetings.');
       const preview = generateSchedule(user, data.slots, now());
       const tasks = trackById(user.trackId).weeks.flatMap(w => w.tasks);
       preview.meetings.forEach((meeting, i) => meeting.topic = tasks[i].title);
@@ -583,6 +645,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const created = transaction(() => {
         if (current(user.id)) throw new AppError(409, 'You already have an unfinished sprint.', 'active_squad');
         rate(`create:${user.id}`, 5, 3600000);
+        if (user.learningMode === 'solo') fail('Start your independent course from checkout.');
         const schedule = generateSchedule(user, data.slots, now());
         const squadId = createSquadRecord(user, schedule, [user.id]);
         return { squadId };

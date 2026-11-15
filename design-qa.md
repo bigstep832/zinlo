@@ -54,3 +54,18 @@ The normalized full-view captures show all important controls and typography cle
 - [x] Mobile navigation and button spacing checked.
 - [x] Routes, chat drafts, video readiness and return flow checked.
 - [x] Server tests and data-preservation check passed.
+
+## Onboarding, checkout, motion and independent course update
+
+User-directed redesign retains the blue visual language. Reviewed desktop 1440 px and mobile 390 px: revised landing, city and weekday availability, review summary, benefits/price checkout, full-page search, real match reveal, compact video toolbar and chat composer. Evidence is in `evidence/landing-after.png`, `landing-mobile.png`, `availability-after.png`, `review-after.png`, `checkout-after.png`, `checkout-mobile.png`, `match-search.png`, `match-found.png`, `video-room-after.png`, `video-room-mobile.png`, `chat-after.png` and `solo-after.png`.
+
+- No horizontal document overflow in tested 390 px views. Video room hides the tall workspace sidebar on mobile, while preserving its return link.
+- Uploaded a generated raster test image through the actual file chooser; server returned a protected avatar. Keyboard ArrowDown/Enter selected Almaty and its named zone.
+- Observed browser network events: saving the final onboarding step sent only PUT profile and GET bootstrap. The matchmaking POST began after the free-checkout button.
+- A real test group formed across Almaty, New York and Los Angeles. Also tested an immediately available match: the page stayed on `/matches`, showed three real members and inserted the confetti animation. System reduced-motion preference disabled animation.
+- Chat: Shift+Enter preserved a newline without sending; Enter posted exactly one message and cleared the draft.
+- Media: synthetic microphone toggled, camera acquisition preserved a muted microphone, camera-off worked, and every synthetic track ended after leaving. No physical microphone/camera or new third-party permissions were used. Prior relay validation remains documented above.
+- Independent learner selected the format, saw $19 launch / $0 demo, entered the course immediately and received calendar-locked weeks; no team chat/meetings appeared in navigation.
+- New scenario tab produced no JavaScript console errors. All 85 server tests passed; production build succeeded.
+
+Pricing and proposed future team/refund policy are documented in README. No real payments, monetary penalties, automatic refunds or moderation system were introduced.

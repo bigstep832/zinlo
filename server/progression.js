@@ -37,7 +37,7 @@ export function planAccess({ plan, progress, squad, meetings, quizResults = [], 
       const earned = !!saved && (saved.status !== 'not_started' || !!saved.note || !!saved.url);
       const unlocked = completedHistory || earned || (released && !firstIncomplete);
       const reason = unlocked ? null : !released ? 'week_not_released' : firstIncomplete?.kind === 'assignment' ? 'previous_assignment_incomplete' : 'previous_lesson_incomplete';
-      const message = unlocked ? '' : reason === 'week_not_released' ? 'This week opens at its first scheduled meeting.' : reason === 'previous_assignment_incomplete' ? `Submit the Week ${firstIncomplete.week} assignment before continuing.` : 'Complete the earlier lesson and its quiz before continuing.';
+      const message = unlocked ? '' : reason === 'week_not_released' ? (squad.learningMode === 'solo' ? 'This week opens on its weekly release date.' : 'This week opens at its first scheduled meeting.') : reason === 'previous_assignment_incomplete' ? `Submit the Week ${firstIncomplete.week} assignment before continuing.` : 'Complete the earlier lesson and its quiz before continuing.';
       const access = { unlocked, canEdit: unlocked && canEdit, releaseAt, reason, message, ...(firstIncomplete?.taskId ? { previousTaskId: firstIncomplete.taskId } : {}), ...(firstIncomplete?.kind === 'assignment' ? { previousAssignmentWeek: firstIncomplete.week } : {}), ...(earned ? { earned: true } : {}) };
       accessByTask.set(task.id, access);
       if (!taskDone(task) && !firstIncomplete) firstIncomplete = { kind: 'lesson', taskId: task.id, week: week.week };

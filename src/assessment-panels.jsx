@@ -34,7 +34,7 @@ export function QuizPanel({ task, answers, onAnswer, onSubmit, editable, state, 
   </>;
 }
 
-export function AssignmentPanel({ assignment, value, dirty, onChange, onSave, editable, state, next }) {
+export function AssignmentPanel({ assignment, value, dirty, onChange, onSave, editable, state, next, solo }) {
   const submitted = assignment.result?.status === 'submitted';
   const checked = value.checkedCriteria;
   const canSubmit = value.text.trim().length >= 40 && assignment.checklist.every(item => checked.includes(item.id));
@@ -42,12 +42,12 @@ export function AssignmentPanel({ assignment, value, dirty, onChange, onSave, ed
     <article className="panel assignment-brief">
       <h3>Your weekly assignment</h3><p>{assignment.prompt}</p>
       <h4>What to hand in</h4><ul>{assignment.deliverables.map((item, index) => <li key={index}>{item}</li>)}</ul>
-      <p className="muted">Submit your own work, then discuss it with your squad. Submission unlocks the next scheduled week. The checklist is your self-review; practical work is not automatically graded or reviewed by an instructor.</p>
+      <p className="muted">{solo ? 'Submit your own work after checking it against every requirement.' : 'Submit your own work, then discuss it with your squad.'} Submission unlocks the next scheduled week. The checklist is your self-review; practical work is not automatically graded or reviewed by an instructor.</p>
       {assignment.credited && <p className="notice">Your previously completed week is already credited. Submitting this new assignment is optional.</p>}
     </article>
     <form className="panel assignment-form" onSubmit={event => { event.preventDefault(); onSave('submitted'); }}>
       <h3>{submitted ? 'Your submitted work' : 'Your work'}</h3>
-      {submitted && <p className="notice">Submitted. You can improve and update this version; your squad can read it.</p>}
+      {submitted && <p className="notice">{solo ? 'Submitted. Your work is saved; you can improve and update this version.' : 'Submitted. You can improve and update this version; your squad can read it.'}</p>}
       {!editable && <p className="muted">Your saved work is read-only.</p>}
       <fieldset disabled={!editable || state?.busy}>
         <label>Your work and a short explanation<textarea rows={9} maxLength={12000} value={value.text} onChange={event => onChange('text', event.target.value)} placeholder="Paste your work, code or dialogue. If you link to a project, describe what you built, how you checked it and what you learned." /></label>
@@ -59,7 +59,7 @@ export function AssignmentPanel({ assignment, value, dirty, onChange, onSave, ed
       {dirty && <p className="muted">Unsaved changes. Save your draft before leaving this squad page.</p>}
       <Feedback state={state} />
     </form>
-    <section className="panel"><h3>Discuss with your squad</h3><p>{assignment.discussion}</p><p className="muted">Submitted work is shared in Progress. Each learner’s progress is independent.</p></section>
+    <section className="panel"><h3>{solo ? 'Reflect on your work' : 'Discuss with your squad'}</h3><p>{solo ? 'Explain your approach out loud. What worked, what did you change, and what would you do differently next time? Save these reflections with your result.' : assignment.discussion}</p><p className="muted">{solo ? 'Your submitted work is available in Progress.' : 'Submitted work is shared in Progress. Each learner’s progress is independent.'}</p></section>
     {(submitted || assignment.credited) && next}
   </>;
 }

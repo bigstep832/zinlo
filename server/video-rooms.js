@@ -81,7 +81,7 @@ export function createVideoRooms({ authorizeMember, meetingReadiness, members, n
     if (data.after !== undefined && (!Number.isSafeInteger(data.after) || data.after < 0)) fail('Invalid signal cursor.');
     return {
       started: room.started, allReady,
-      participants: roster.map(member => { const person = [...room.peers.values()].find(item => item.userId === member.id); return { userId: member.id, name: member.name, peerId: person?.id, ready: !!person?.ready, present: !!person }; }),
+      participants: roster.map(member => { const person = [...room.peers.values()].find(item => item.userId === member.id); return { userId: member.id, name: member.name, avatarUrl: member.avatarUrl, peerId: person?.id, ready: !!person?.ready, present: !!person }; }),
       signals: room.signals.filter(signal => signal.to === peer.id && signal.id > (data.after || 0)).map(({ id, from, signal }) => ({ id, from, signal })),
       cursor: room.sequence,
     };

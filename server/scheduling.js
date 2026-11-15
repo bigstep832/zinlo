@@ -1,3 +1,4 @@
+import { getCity } from './locations.js';
 import { DateTime, IANAZone } from 'luxon';
 import { trackById, isActiveTrack } from './curricula.js';
 
@@ -41,8 +42,12 @@ export function validateProfile(body, { allowedArchivedTrackId } = {}) {
   if (!track) fail('Choose a learning track.');
   if (!isActiveTrack(body.trackId) && body.trackId !== allowedArchivedTrackId) fail('This course is archived. Choose one of the available courses.', 'track_archived');
   if (!track.levels.some(level => level.id === body.level)) fail(body.trackId === 'ai' ? 'AI Apps requires basic Python knowledge.' : 'Choose your current preparation level.', body.trackId === 'ai' ? 'prerequisite' : 'invalid_input');
+  const city = body.cityId ? getCity(body.cityId) : null;
+  if (body.cityId && !city) fail('Choose a city from the search results.');
+  if (city) body = { ...body, timezone: city.timezone };
+  if (body.learningMode !== undefined && !['solo', 'squad'].includes(body.learningMode)) fail('Choose a learning format.');
   if (typeof body.timezone !== 'string' || body.timezone.length > 100 || !(IANAZone.isValidZone(body.timezone) || body.timezone === 'UTC')) fail('Choose a valid named time zone.');
-  return { name: body.name.trim(), trackId: body.trackId, level: body.level, timezone: body.timezone, availability: validateAvailability(body.availability) };
+  return { name: body.name.trim(), trackId: body.trackId, level: body.level, timezone: body.timezone, availability: body.learningMode === 'solo' ? [] : validateAvailability(body.availability), ...(city ? { cityId: city.id, cityLabel: city.label } : {}), ...(body.learningMode ? { learningMode: body.learningMode } : {}) };
 }
 export function cohortStart(timezone, now = new Date()) {
   return DateTime.fromJSDate(now, { zone: timezone }).startOf('week').plus({ weeks: 1 }).toISODate();

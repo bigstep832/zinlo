@@ -1,0 +1,7 @@
+City names, alternate names, administrative regions and IANA time zones: GeoNames.
+Source: https://download.geonames.org/export/dump/
+Files: cities500.zip, admin1CodesASCII.txt. Retrieved 2026-11-15.
+License: Creative Commons Attribution 4.0 https://creativecommons.org/licenses/by/4.0/
+Data provided as-is. Local transformation retains city names, aliases, region,
+country, population and time zone; coordinates are not retained.
+Rebuild: python scripts/build-cities.py PATH_TO_DOWNLOADED_SOURCE_FILES

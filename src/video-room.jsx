@@ -1,10 +1,22 @@
+import { Avatar } from './avatar.jsx';
 import React, { useEffect, useRef, useState } from 'react';
 import { SquadVideoMesh } from './video-peer.js';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Check, Volume2, RotateCw, Users } from 'lucide-react';
+import './video-room.css';
 
-function VideoTile({ stream, name, self, status }) {
+function VideoTile({ stream, name, avatarUrl, self, status, cameraOff = false }) {
   const element = useRef(null), [playBlocked, setPlayBlocked] = useState(false);
-  useEffect(() => { const video = element.current; if (!video) return; video.srcObject = stream || null; if (stream) video.play().catch(() => setPlayBlocked(true)); return () => { video.srcObject = null; }; }, [stream]);
-  return <div className="video-tile"><video ref={element} autoPlay playsInline muted={self} aria-label={`${name} video`} />{!stream && <div className="video-placeholder"><strong>{name}</strong><p>{status || 'Waiting to connect'}</p></div>}<span className="video-name">{name}{self ? ' (you)' : ''}{status ? ` · ${status}` : ''}</span>{playBlocked && <button className="video-play" onClick={() => element.current.play().then(() => setPlayBlocked(false)).catch(() => {})}>Play audio and video</button>}</div>;
+  useEffect(() => { const video = element.current; if (!video) return; let cancelled = false; setPlayBlocked(false); video.srcObject = stream || null; if (stream) video.play().catch(() => { if (!cancelled) setPlayBlocked(true); }); return () => { cancelled = true; video.srcObject = null; }; }, [stream]);
+  const noPicture = !stream?.getVideoTracks().length || cameraOff;
+  return <div className={`video-tile${self ? ' video-tile-self' : ''}`}>
+    <video ref={element} autoPlay playsInline muted={self} aria-label={`${name} video`} />
+    {noPicture && <div className="video-placeholder"><Avatar name={name} src={avatarUrl} size={64}/><p>{status}</p></div>}
+    <span className="video-name" title={name}>{name}{self && <span> (you)</span>}</span>
+    {playBlocked && <button className="video-play" onClick={() => element.current.play().then(() => setPlayBlocked(false)).catch(() => {})}><Volume2 size={16} aria-hidden="true" />Play audio</button>}
+  </div>;
+}
+function CallControl({ label, icon: Icon, tone = '', ...props }) {
+  return <span className="call-control-wrap"><button type="button" className={`call-icon ${tone}`} aria-label={label} title={label} {...props}><Icon size={20} strokeWidth={1.8} aria-hidden="true" /></button><span className="call-tooltip" aria-hidden="true">{label}</span></span>;
 }
 export function VideoRoom({ squadId, meetingId, api, onLeave }) {
   const [session, setSession] = useState(null), [state, setState] = useState(null), [stream, setStream] = useState(null);
@@ -53,7 +65,9 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access needs HTTPS and a supported browser.');
       const value = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: video ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } } : false });
       if (!live.current || requestGeneration !== generation.current || readyRef.current) { value.getTracks().forEach(track => track.stop()); return; }
-      local.current?.getTracks().forEach(track => track.stop()); local.current = value; setStream(value); setMic(true); setCamera(video);
+      const micEnabled = local.current?.getAudioTracks()[0]?.enabled ?? true;
+      value.getAudioTracks().forEach(track => { track.enabled = micEnabled; });
+      local.current?.getTracks().forEach(track => track.stop()); local.current = value; setStream(value); setMic(micEnabled); setCamera(video);
     } catch (e) { if (live.current && requestGeneration === generation.current) setError(e.name === 'NotAllowedError' ? 'Camera or microphone permission was denied. Allow it in your browser, try microphone only, or join to listen.' : e.name === 'NotFoundError' ? 'No matching camera or microphone was found. You can join to listen.' : e.message); }
     finally { if (live.current && requestGeneration === generation.current) setBusy(false); }
   }
@@ -64,15 +78,33 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
   }
   function toggle(kind) { const value = kind === 'audio' ? !mic : !camera; local.current?.getTracks().filter(track => track.kind === kind).forEach(track => { track.enabled = value; }); kind === 'audio' ? setMic(value) : setCamera(value); }
   const connected = Object.values(connections).filter(value => value === 'connected').length;
-  return <section className="video-room"><div className="learning-intro"><p className="eyebrow">SQUAD VIDEO ROOM</p><h1>{ready && state?.started ? 'You’re here together.' : 'Ready when you are.'}</h1><p>No account needed. Your camera and microphone stay off until you enable them.</p></div>
+  const hasAudio = !!stream?.getAudioTracks().length, hasVideo = !!stream?.getVideoTracks().length;
+  const inCall = ready && state?.started;
+  const readyCount = state?.participants.filter(person => person.ready).length || 0;
+  const needsReconnect = ended || Object.values(connections).some(value => ['failed', 'disconnected'].includes(value));
+  const selfName = state?.participants.find(person => person.peerId === session?.peerId)?.name || 'You';
+  return <section className="video-room" aria-labelledby="video-room-title">
+    <header className="video-room-heading"><div><h1 id="video-room-title">Your squad room</h1><p>{inCall ? 'A little time to learn together.' : 'Settle in. Let your team know you’re ready.'}</p></div>{state && <span className="room-people"><Users size={16} aria-hidden="true" />{state.participants.length} people</span>}</header>
     {error && <p className="notice error" role="alert">{error}</p>}
-    {!session && !ended && <p role="status">Opening your private team room…</p>}
-    <div className="video-grid"><VideoTile stream={stream} name="Your preview" self status={ready ? 'Ready' : 'Not ready yet'} />{state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} status={connections[person.peerId] || (person.ready ? 'Ready' : person.present ? 'In the waiting room' : 'Not here yet')} />)}</div>
-    <p className="call-status" role="status">{ready && state?.started ? `${connected} teammate${connected === 1 ? '' : 's'} connected` : `${state?.participants.filter(person => person.ready).length || 0} of ${state?.participants.length || 0} ready. The call starts when everyone confirms.`}</p>
-    <div className="call-controls">{!ready && !ended && <><button disabled={busy || !session} onClick={() => enableMedia(true)}>Enable camera and microphone</button><button disabled={busy || !session} onClick={() => enableMedia(false)}>Microphone only</button></>}{stream && <><button aria-pressed={!mic} disabled={!stream.getAudioTracks().length} onClick={() => toggle('audio')}>{mic ? 'Mute microphone' : 'Unmute microphone'}</button>{stream.getVideoTracks().length > 0 && <button aria-pressed={!camera} onClick={() => toggle('video')}>{camera ? 'Turn camera off' : 'Turn camera on'}</button>}</>}{!ready && !ended && <button className="primary" disabled={busy || !session} onClick={confirmReady}>{stream ? 'Confirm I’m ready' : 'Join to listen — I’m ready'}</button>}<button className="end-call" onClick={onLeave}>{ready ? 'Leave call and return home' : 'Back to squad home'}</button></div>
-    {(ended || Object.values(connections).some(value => ['failed', 'disconnected'].includes(value))) && <button onClick={() => { setStream(null); setRetry(value => value + 1); }}>Reconnect to video room</button>}
-    {!ready && <p className="muted">After confirming, your enabled camera and microphone will be shared when the team is ready. You can also join without either and listen. This site does not record calls.</p>}
-    {ready && !stream && <p className="muted">You joined to listen. To enable a microphone or camera, leave and rejoin the room.</p>}
-    {session && !session.relayConfigured && <p className="muted">Direct connection mode. If your network blocks the call, try another network or use Google Meet from the Meetings page.</p>}
+    <div className="video-stage">
+      <div className="video-grid">
+        <VideoTile stream={stream} name={selfName} avatarUrl={state?.participants.find(person => person.peerId === session?.peerId)?.avatarUrl} self cameraOff={!camera} status={hasVideo && !camera ? 'Camera off' : ready ? 'Ready' : 'Your preview'} />
+        {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} status={connections[person.peerId] === 'connected' ? 'Connected' : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
+      </div>
+      <div className="call-controls" role="group" aria-label="Call controls">
+        <p className={`call-status${inCall ? ' call-status-live' : ''}`} role="status"><span className="call-status-dot" aria-hidden="true" />{ended ? 'Call disconnected' : !state ? 'Opening room…' : inCall ? `${connected} connected` : `${readyCount} of ${state.participants.length} ready`}</p>
+        <div className="call-actions">
+          <CallControl label={hasAudio ? (mic ? 'Mute microphone' : 'Unmute microphone') : 'Enable microphone'} icon={hasAudio && mic ? Mic : MicOff} tone={!hasAudio || !mic ? 'call-device-off' : ''} aria-pressed={hasAudio && mic} disabled={busy || !session || ended || (ready && !hasAudio)} onClick={() => hasAudio ? toggle('audio') : enableMedia(false)} />
+          <CallControl label={hasVideo ? (camera ? 'Turn camera off' : 'Turn camera on') : 'Enable camera and microphone'} icon={hasVideo && camera ? Video : VideoOff} tone={!hasVideo || !camera ? 'call-device-off' : ''} aria-pressed={hasVideo && camera} disabled={busy || !session || ended || (ready && !hasVideo)} onClick={() => hasVideo ? toggle('video') : enableMedia(true)} />
+          <span className="call-divider" aria-hidden="true" />
+          {!ready && !ended && <button className="call-ready" disabled={busy || !session} onClick={confirmReady}><Check size={17} aria-hidden="true" />{busy ? 'One moment…' : 'I’m ready'}</button>}
+          {ready && !inCall && !ended && <span className="call-confirmed"><Check size={17} aria-hidden="true" />Ready</span>}
+          {needsReconnect && <CallControl label="Reconnect to video room" icon={RotateCw} onClick={() => { setStream(null); setRetry(value => value + 1); }} />}
+          <CallControl label="Leave call and return home" icon={PhoneOff} tone="call-leave" onClick={onLeave} />
+        </div>
+      </div>
+    </div>
+    <p className="room-hint">{!ready ? 'Turn on your mic or camera, or join to listen. The call starts when everyone is ready.' : !stream ? 'Listening only. Leave and rejoin to enable your mic or camera.' : !inCall ? 'You’re ready. Your mic and camera are shared when everyone joins.' : 'Leave the call any time to return to your squad.'}</p>
+    <details className="room-help"><summary>Call details</summary><p>This site does not record calls. Camera and microphone access starts only when you enable it.</p>{session && !session.relayConfigured && <p>If your network blocks the call, try another network or Google Meet from the Meetings page.</p>}</details>
   </section>;
 }

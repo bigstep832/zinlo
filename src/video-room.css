@@ -1,0 +1,46 @@
+.video-room{--room-bg:#111b2b;--room-tile:#1d2a3e;--room-line:#3b4a61;--room-muted:#b7c5d9;max-width:1140px;margin:0 auto}
+.video-room .video-room-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}
+.video-room-heading h1{font-size:28px;line-height:1.2;letter-spacing:-.7px;margin:0 0 7px}
+.video-room-heading p{font-size:14px;color:var(--muted);margin:0}
+.room-people{display:flex;align-items:center;gap:7px;font-size:13px;white-space:nowrap;color:var(--muted)}
+.video-stage{padding:12px 12px 0;background:var(--room-bg);border-radius:16px}
+.video-room .video-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0}
+.video-room .video-tile{position:relative;aspect-ratio:16/9;max-height:25dvh;min-height:150px;border-radius:9px;overflow:hidden;background:var(--room-tile);color:#f4f7fb;display:grid;place-items:center}
+.video-room .video-tile:last-child:nth-child(odd){grid-column:1/-1;justify-self:center;width:calc(50% - 5px)}
+.video-room .video-tile:only-child{width:100%;max-height:46dvh}
+.video-room .video-tile video{width:100%;height:100%;object-fit:cover;min-height:0}
+.video-room .video-tile-self video{transform:scaleX(-1)}
+.video-room .video-placeholder{position:absolute;display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:none}
+.video-room .video-avatar{display:grid;place-items:center;width:56px;height:56px;border-radius:50%;background:#2e405e;color:#dce8ff;font-size:19px;font-weight:600;letter-spacing:.02em}
+.video-room .video-tile-self .video-avatar{background:#314d83;color:#e6eeff}
+.video-room .video-placeholder p{margin:0;color:var(--room-muted);font-size:12px;font-weight:400}
+.video-room .video-name{position:absolute;bottom:10px;left:12px;max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#111b2bd9;padding:3px 7px;border-radius:4px;font-size:12px}
+.video-name span{color:var(--room-muted)}
+.video-room .call-controls{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:76px;padding:14px 8px;margin:0}
+.video-room .call-status{display:flex;align-items:center;gap:8px;margin:0;color:var(--room-muted);font-size:12px;white-space:nowrap}
+.call-status-dot{width:6px;height:6px;background:#9aabc3;border-radius:50%;flex-shrink:0}.call-status-live .call-status-dot{background:#8ad4b4}
+.call-actions{display:flex;align-items:center;justify-content:center;gap:10px}
+.call-control-wrap{position:relative;display:inline-flex;flex:0 0 auto}
+.video-room .call-icon{display:grid;place-items:center;flex:none;width:44px;height:44px;min-height:44px;padding:0;border:1px solid var(--room-line);border-radius:50%;background:#27374e;color:#f3f6fc;transition:background-color 130ms,border-color 130ms}
+.video-room .call-icon:hover:not(:disabled){background:#3b506d;border-color:#70849f}
+.video-room .call-icon.call-device-off{background:#e5ebf4;color:#26354d;border-color:#e5ebf4}
+.video-room .call-icon.call-device-off:hover:not(:disabled){background:#fff;border-color:#fff}
+.video-room .call-icon.call-leave{background:#d84e59;border-color:#d84e59;color:#fff;width:52px;border-radius:24px}
+.video-room .call-icon.call-leave:hover{background:#bb3845;border-color:#bb3845}
+.call-tooltip{position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);padding:7px 10px;border-radius:6px;background:#f4f7fb;color:#172232;font-size:12px;white-space:nowrap;pointer-events:none;opacity:0;visibility:hidden;z-index:2}
+.call-control-wrap:last-child .call-tooltip{left:auto;right:0;transform:none}
+.call-control-wrap:hover .call-tooltip,.call-control-wrap:focus-within .call-tooltip{opacity:1;visibility:visible}
+.call-divider{height:24px;width:1px;background:var(--room-line);margin:0 3px;flex-shrink:0}
+.video-room .call-ready{display:flex;align-items:center;justify-content:center;gap:7px;border:1px solid #346bf2;background:#346bf2;color:#fff;border-radius:22px;min-height:44px;padding:9px 17px;font-size:13px;white-space:nowrap;font-weight:600}
+.video-room .call-ready:hover:not(:disabled){background:#497df6;border-color:#497df6}
+.call-confirmed{display:flex;align-items:center;gap:6px;padding:0 9px;font-size:13px;color:#a7dbc2;min-height:44px}
+.video-room .call-controls button:disabled{opacity:.45;cursor:not-allowed}.video-room button:focus-visible{outline:3px solid #a5c2ff;outline-offset:4px}
+.video-room .room-hint{font-size:13px;color:var(--muted);margin:14px 0 0;line-height:1.6}
+.video-room .room-help{font-size:12px;color:var(--muted);margin-top:10px;border:0;padding:0}.video-room .room-help summary{cursor:pointer;width:fit-content}.video-room .room-help p{max-width:650px;margin:10px 0}
+.video-room .video-play{position:absolute;inset:auto 12px 44px;display:flex;align-items:center;justify-content:center;gap:7px;padding:8px 10px;min-height:36px;background:#f4f7fb;color:#172232;border:0;border-radius:6px;font-size:12px}
+.squad-content:has(.video-room) .workspace-top{padding-bottom:18px;margin-bottom:20px}.squad-content:has(.video-room) .back-home{margin-bottom:20px}
+@media(max-width:900px){.video-room .call-controls{flex-direction:column;gap:12px;padding:15px 4px}.video-room .call-status{order:2}.video-room .video-tile{min-height:130px}.video-room-heading h1{font-size:25px}}
+@media(max-width:480px){.video-room .video-room-heading{align-items:flex-start}.room-people{font-size:12px}.video-room-heading p{font-size:13px;max-width:220px}.video-stage{padding:8px 8px 0;border-radius:12px}.video-room .video-grid{gap:8px}.video-room .video-tile{aspect-ratio:1;min-height:120px;max-height:none}.video-room .video-tile:last-child:nth-child(odd){width:calc(50% - 4px)}.video-room .video-tile:only-child{width:100%;aspect-ratio:16/10}.video-room .video-avatar{width:42px;height:42px;font-size:15px}.video-room .video-name{left:6px;bottom:6px;max-width:calc(100% - 12px);font-size:11px;padding:2px 4px}.video-room .video-placeholder{gap:8px}.video-room .video-placeholder p{font-size:11px}.call-actions{gap:8px}.call-divider{margin:0 1px}.video-room .call-ready{padding:9px 12px}.video-room .call-controls{padding-bottom:14px}.video-room .call-controls button{flex:none}.video-room .room-hint{font-size:12px}.call-tooltip{max-width:210px;white-space:normal;text-align:center}}
+@media(prefers-reduced-motion:reduce){.video-room .call-icon{transition:none}}
+.video-room .video-tile{width:100%}.call-tooltip{width:max-content;max-width:210px}
+@media(max-width:900px){.room-shell .squad-sidebar{display:none}}
