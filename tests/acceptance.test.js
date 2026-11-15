@@ -193,7 +193,7 @@ test('matching enforces track, level and entire one-hour windows', async t => {
   const owner = await f.guest('Owner');
   const id = await createSquad(owner);
   const incompatible = [
-    { trackId: 'javascript' },
+    { trackId: 'spanish' },
     { level: 'basics' },
     { availability: [{ day: 2, start: '19:30', end: '21:00' }, { day: 4, start: '19:00', end: '21:00' }] },
     { availability: [{ day: 2, start: '19:00', end: '21:00' }, { day: 5, start: '19:00', end: '21:00' }] },
@@ -230,7 +230,7 @@ test('all eight concrete meetings are checked across a US daylight-saving change
   assert.equal((await sameZone.ok('/api/matches')).squads[0].id, id);
 });
 
-test('profile validation prevents invalid schedules and enforces AI prerequisites', async t => {
+test('profile validation prevents invalid schedules and retired courses while accepting AI literacy beginners', async t => {
   const f = await fixture(t);
   const person = f.client();
   await person.ok('/api/session', 'POST', {});
@@ -242,7 +242,7 @@ test('profile validation prevents invalid schedules and enforces AI prerequisite
     { trackId: 'ai', level: 'beginner' },
     { trackId: 'not-a-track' },
   ]) invalid(await person.request('/api/profile', 'PUT', profile('Invalid', extra)));
-  await person.ok('/api/profile', 'PUT', profile('AI learner', { trackId: 'ai', level: 'basics' }));
+  await person.ok('/api/profile', 'PUT', profile('AI learner', { trackId: 'ai-literacy', level: 'beginner' }));
 });
 
 test('matching prioritizes squads needing a third member and returns at most three', async t => {
@@ -282,7 +282,7 @@ test('changing availability reports conflicts and requires confirmation without 
   assert.equal(result.body.code, 'schedule_conflict');
   await a.ok('/api/profile', 'PUT', { ...changed, confirmConflict: true });
   assert.deepEqual((await dashboard(a, id)).meetings.map(item => item.startsAt), before.meetings.map(item => item.startsAt));
-  const changedTrack = await a.request('/api/profile', 'PUT', { ...changed, trackId: 'javascript', confirmConflict: true });
+  const changedTrack = await a.request('/api/profile', 'PUT', { ...changed, trackId: 'spanish', confirmConflict: true });
   assert.ok([400, 409, 422].includes(changedTrack.status));
 });
 

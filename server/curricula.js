@@ -1,7 +1,9 @@
+import { activeTracks } from './course-catalog.js';
+
 function week(number, title, preparation, tasks) {
   return { week: number, title, preparation, tasks: tasks.map(([title, description, criteria], i) => ({ id: `week-${number}-task-${i + 1}`, week: number, title, description, criteria })) };
 }
-export const tracks = [
+const previousTracks = [
   { id: 'python', title: 'Python Foundations', description: 'Learn functions, collections, and file storage by building a practical command-line tool.', project: 'A command-line habit tracker', prerequisite: 'No previous coding experience required.', weeks: [
     week(1, 'Create and list habits', 'Install Python 3. Run a short script that prints your name. Bring one habit you would like to track.', [
       ['Add a habit', 'Create an add_habit function that accepts a name and stores it in a list. Call it with two examples.', 'Two distinct habits can be added; blank names are rejected.'],
@@ -57,9 +59,22 @@ export const tracks = [
     ])
   ]}
 ];
-export const trackById = id => tracks.find(track => track.id === id);
+export const tracks = activeTracks;
+export const archivedTracks = previousTracks.filter(track => track.id !== 'python').map(track => ({
+  ...track, archived: true, category: 'programming', shortTitle: track.id === 'ai' ? 'AI Apps' : 'JavaScript',
+  levels: track.id === 'ai' ? [{ id: 'basics', title: 'Know the basics', description: 'I can use Python variables, loops, functions and collections.' }] : [
+    { id: 'beginner', title: 'Starting from scratch', description: 'I have little or no experience writing code.' },
+    { id: 'basics', title: 'Know the basics', description: 'I can use variables, conditions, loops and simple functions.' },
+  ],
+}));
+export const trackById = id => [...tracks, ...archivedTracks].find(track => track.id === id);
+export const isActiveTrack = id => tracks.some(track => track.id === id);
 export function basePlan(trackId, level) {
-  const plan = { source: 'base', weeks: structuredClone(trackById(trackId).weeks) };
-  if (level === 'basics' && trackId !== 'ai') for (const w of plan.weeks) w.preparation += ' Since you know the basics, bring one edge case and explain the trade-offs in your solution.';
+  const track = trackById(trackId);
+  if (!track) throw new Error('Unknown learning track');
+  const plan = { source: 'base', level, weeks: structuredClone(track.weeks) };
+  if (level === 'basics') for (const w of plan.weeks) {
+    w.preparation += track.archived && trackId !== 'ai' ? ' Since you know the basics, bring one edge case and explain the trade-offs in your solution.' : !track.archived ? ' Use the extension challenge in each task to deepen your practice.' : '';
+  }
   return plan;
 }

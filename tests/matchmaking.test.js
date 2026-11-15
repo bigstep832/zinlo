@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../server/app.js';
-import { basePlan } from '../server/curricula.js';
+import { basePlan, trackById } from '../server/curricula.js';
 
 const initialTime = '2026-11-15T12:00:00.000Z';
 const slots = [{ day: 2, start: '19:00' }, { day: 4, start: '19:00' }];
@@ -287,7 +287,7 @@ test('pairwise compatibility does not create a squad without two windows shared 
 test('incompatible older searchers do not block an available compatible subset', async t => {
   const f = await fixture(t);
   const old = await f.guest('Earlier incompatible schedule', { availability: windows([1, 3]) });
-  const differentTrack = await f.guest('JavaScript waiting', { trackId: 'javascript' });
+  const differentTrack = await f.guest('Spanish waiting', { trackId: 'spanish' });
   const differentLevel = await f.guest('Basics waiting', { level: 'basics' });
   for (const person of [old, differentTrack, differentLevel]) { await start(person); f.advance(1_000); }
   const people = await Promise.all(['Compatible A', 'Compatible B', 'Compatible C'].map(name => f.guest(name)));
@@ -350,16 +350,16 @@ test('queue endpoints expose only own status and cannot cancel another person by
 test('display numbers are stable, unique across courses, and ignore incoming custom names', async t => {
   const f = await fixture(t);
   const python = await f.guest('Python');
-  const javascript = await f.guest('JavaScript', { trackId: 'javascript' });
+  const spanish = await f.guest('Spanish', { trackId: 'spanish' });
   const pyId = await manualSquad(python, 'Please use this forbidden custom name');
-  const jsId = await manualSquad(javascript, 'Another custom name');
+  const spanishId = await manualSquad(spanish, 'Another custom name');
   assert.equal((await dashboard(python, pyId)).squad.name, 'Python Foundations #001');
-  assert.equal((await dashboard(javascript, jsId)).squad.name, 'JavaScript Foundations #002');
+  assert.equal((await dashboard(spanish, spanishId)).squad.name, `${trackById('spanish').title} #002`);
   await f.restart();
   assert.equal((await dashboard(python, pyId)).squad.name, 'Python Foundations #001');
-  const ai = await f.guest('AI', { trackId: 'ai', level: 'basics' });
+  const ai = await f.guest('AI', { trackId: 'ai-literacy', level: 'basics' });
   const aiId = await manualSquad(ai);
-  assert.equal((await dashboard(ai, aiId)).squad.name, 'AI Apps with Python #003');
+  assert.equal((await dashboard(ai, aiId)).squad.name, `${trackById('ai-literacy').title} #003`);
 });
 
 test('legacy squads receive stable display numbers without losing UUID routes, sessions or saved work', async t => {

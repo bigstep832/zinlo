@@ -1,4 +1,5 @@
 import { DateTime, IANAZone } from 'luxon';
+import { trackById, isActiveTrack } from './curricula.js';
 
 export class AppError extends Error {
   constructor(status, message, code, extra = {}) { super(message); this.status = status; this.code = code; this.extra = extra; }
@@ -33,12 +34,13 @@ export function validateAvailability(input) {
   if (new Set(merged.filter(i => minutes(i.end, true) - minutes(i.start) >= 60).map(i => i.day)).size < 2) fail('Allow at least one complete hour on each of two different days.');
   return merged;
 }
-export function validateProfile(body) {
+export function validateProfile(body, { allowedArchivedTrackId } = {}) {
   if (!body || typeof body !== 'object') fail('Provide your profile.');
   if (typeof body.name !== 'string' || body.name.trim().length < 1 || body.name.trim().length > 60) fail('Your name must be between 1 and 60 characters.');
-  if (!['python', 'javascript', 'ai'].includes(body.trackId)) fail('Choose a learning track.');
-  if (!['beginner', 'basics'].includes(body.level)) fail('Choose your current preparation level.');
-  if (body.trackId === 'ai' && body.level !== 'basics') fail('AI Apps requires basic Python knowledge. Choose Python Foundations to start from zero.', 'prerequisite');
+  const track = trackById(body.trackId);
+  if (!track) fail('Choose a learning track.');
+  if (!isActiveTrack(body.trackId) && body.trackId !== allowedArchivedTrackId) fail('This course is archived. Choose one of the available courses.', 'track_archived');
+  if (!track.levels.some(level => level.id === body.level)) fail(body.trackId === 'ai' ? 'AI Apps requires basic Python knowledge.' : 'Choose your current preparation level.', body.trackId === 'ai' ? 'prerequisite' : 'invalid_input');
   if (typeof body.timezone !== 'string' || body.timezone.length > 100 || !(IANAZone.isValidZone(body.timezone) || body.timezone === 'UTC')) fail('Choose a valid named time zone.');
   return { name: body.name.trim(), trackId: body.trackId, level: body.level, timezone: body.timezone, availability: validateAvailability(body.availability) };
 }

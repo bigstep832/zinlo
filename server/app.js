@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tracks, trackById, basePlan } from './curricula.js';
+import { tracks, archivedTracks, trackById, isActiveTrack, basePlan } from './curricula.js';
 import { AppError, fail, validateProfile, generateSchedule, scheduleConflicts, cohortStart } from './scheduling.js';
 import { findAutomaticGroup, hasSeparateMeetingDays } from './matchmaking.js';
 import { createGoogleMeetService } from './google-meet.js';
@@ -36,9 +36,9 @@ function validateAIWeeks(input, previous) {
   if (!Array.isArray(weeks) || weeks.length !== 4) throw new Error('Invalid AI plan');
   return weeks.map((week, i) => {
     if (week.week !== i + 1 || !Array.isArray(week.tasks) || week.tasks.length !== 2) throw new Error('Invalid AI week');
-    return { week: i + 1, title: textField(week.title, 160, 'Week title', true), preparation: textField(week.preparation, 1600, 'Preparation', true), tasks: week.tasks.map((task, j) => {
+    return { ...previous[i], week: i + 1, title: textField(week.title, 160, 'Week title', true), preparation: textField(week.preparation, 1600, 'Preparation', true), tasks: week.tasks.map((task, j) => {
       if (task.id !== previous[i].tasks[j].id) throw new Error('AI changed task identity');
-      return { id: task.id, week: i + 1, title: textField(task.title, 200, 'Task title', true), description: textField(task.description, 2400, 'Description', true), criteria: textField(task.criteria, 1600, 'Criteria', true) };
+      return { ...previous[i].tasks[j], id: task.id, week: i + 1, title: textField(task.title, 200, 'Task title', true), description: textField(task.description, 2400, 'Description', true), criteria: textField(task.criteria, 1600, 'Criteria', true) };
     }) };
   });
 }
@@ -51,7 +51,7 @@ function configuredAIAdapter() {
       method: 'POST', signal: AbortSignal.timeout(20000),
       headers: { 'content-type': 'application/json', authorization: `Bearer ${process.env.AI_API_KEY}` },
       body: JSON.stringify({ model: process.env.AI_MODEL, response_format: { type: 'json_object' }, messages: [
-        { role: 'system', content: 'Adapt a four-week peer-learning curriculum. Return JSON {weeks:[{week,title,preparation,tasks:[{id,week,title,description,criteria}]}]}. Preserve exactly four weeks, two tasks per week, all task ids and week numbers. Keep the same attainable project, scope and prerequisites. Each meeting is 50 minutes; independent practice is two hours per week. Do not imply a teacher or guaranteed mastery. Use English. Do not require paid tools; AI projects must retain a free mock mode.' },
+        { role: 'system', content: 'Adapt a four-week peer-learning curriculum. Return JSON {weeks:[{week,title,preparation,tasks:[{id,week,title,description,criteria}]}]}. Preserve exactly four weeks, two tasks per week, all task ids and week numbers. Keep the same attainable outcome, task intent, scope and prerequisites. Existing step-by-step guidance, practice questions, examples and extension challenges stay fixed; your wording must remain consistent with them. Each meeting is 50 minutes; independent practice is two hours per week. Do not imply a teacher, certification or guaranteed mastery. Use English for explanations; retain target-language examples for a language course. Do not require paid tools or introduce coding prerequisites into a non-coding course. Existing programming AI projects must retain a free mock mode.' },
         { role: 'user', content: JSON.stringify(input) }
       ] })
     });
@@ -114,6 +114,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       run('UPDATE squads SET name=?,display_number=? WHERE id=?', name, number, squad.id);
     }
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS squads_display_number ON squads(display_number)');
+    retireArchivedSearches();
   });
   function rate(key, limit, duration) {
     const time = now().getTime();
@@ -151,6 +152,9 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (complete && !user.trackId) throw new AppError(400, 'Complete your profile first.', 'profile_required');
     return user;
   }
+  function requireActiveTrack(trackId) {
+    if (!isActiveTrack(trackId)) throw new AppError(409, 'This course is archived. Choose an available course to find a new squad.', 'track_archived');
+  }
   function current(userId) {
     return q("SELECT s.squad_id AS id FROM sprints s JOIN memberships m ON m.squad_id = s.squad_id WHERE m.user_id = ? AND m.active = 1 AND s.status IN ('forming','ready','active') LIMIT 1", userId)?.id || null;
   }
@@ -173,10 +177,16 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   function bootstrap(user) {
     const currentSquadId = user ? current(user.id) : null;
     const history = user ? all('SELECT squad_id FROM memberships WHERE user_id = ? ORDER BY joined_at DESC', user.id).filter(m => m.squad_id !== currentSquadId).map(m => summary(squadRow(m.squad_id))) : [];
-    return { user, tracks, currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
+    return { user, tracks, archivedTracks, currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
+  }
+  function retireArchivedSearches() {
+    for (const person of all("SELECT m.user_id,u.profile FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting'")) {
+      if (!isActiveTrack(JSON.parse(person.profile).trackId)) run("UPDATE matchmaking_queue SET state='expired' WHERE user_id=? AND state='waiting'", person.user_id);
+    }
   }
   function expireSearches() {
     run("UPDATE matchmaking_queue SET state='expired' WHERE state='waiting' AND expires_at <= ?", stamp());
+    retireArchivedSearches();
   }
   function searchState(userId) {
     const squadId = current(userId);
@@ -188,6 +198,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return { status: 'waiting', waitingSince: search.queued_at, expiresAt: search.expires_at, message: 'Looking for at least three learners with the same course, level, and eight compatible meeting windows. Keep this page open.' };
   }
   function createSquadRecord(anchor, schedule, participantIds, automatic = false) {
+    requireActiveTrack(anchor.trackId);
     if (participantIds.length < 1 || participantIds.length > 4 || new Set(participantIds).size !== participantIds.length) throw new Error('Invalid team membership');
     for (const userId of participantIds) if (current(userId)) throw new AppError(409, 'A learner has already joined another unfinished sprint.', 'active_squad');
     const squadId = id(), sprintId = id(), plan = basePlan(anchor.trackId, anchor.level);
@@ -211,7 +222,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       // Membership changes and queue consumption share this BEGIN IMMEDIATE lock.
       run("DELETE FROM matchmaking_queue WHERE user_id IN (SELECT m.user_id FROM memberships m JOIN sprints s ON s.squad_id=m.squad_id WHERE m.active=1 AND s.status IN ('forming','ready','active'))");
       let queued = all("SELECT u.id,u.profile,m.queued_at FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting' ORDER BY m.queued_at,m.rowid").map(row => ({ ...JSON.parse(row.profile), id: row.id, queuedAt: row.queued_at }));
-      const open = all("SELECT q.*,s.id AS sprint_id,s.status,s.starts_at,s.ends_at,s.timezone,s.plan FROM squads q JOIN sprints s ON s.squad_id=q.id WHERE q.auto_matched=1 AND s.status='ready' AND s.starts_at > ? ORDER BY s.starts_at,q.display_number", stamp()).filter(row => members(row.id).length === 3);
+      const open = all("SELECT q.*,s.id AS sprint_id,s.status,s.starts_at,s.ends_at,s.timezone,s.plan FROM squads q JOIN sprints s ON s.squad_id=q.id WHERE q.auto_matched=1 AND s.status='ready' AND s.starts_at > ? ORDER BY s.starts_at,q.display_number", stamp()).filter(row => isActiveTrack(row.track_id) && members(row.id).length === 3);
       const fingerprint = JSON.stringify([queued.map(person => [person.id, person.trackId, person.level, person.timezone, person.availability, person.queuedAt, cohortStart(person.timezone, now())]), open.map(row => [row.id, members(row.id).map(member => member.id)])]);
       if (fingerprint === lastMatchFingerprint) return;
       lastMatchFingerprint = fingerprint;
@@ -290,6 +301,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return { eligible, selfReady: activeMember && !!roster.find(person => person.id === selfId)?.ready, readyCount, totalCount: roster.length, members: activeMember ? roster : [], allReady, status, ...(error ? { error } : {}), ...(meeting.meet_url ? { launchId: launch?.launch_id || `${meetingId}:${hash(meeting.meet_url).slice(0,16)}` } : {}) };
   }
   function canJoin(user, row) {
+    requireActiveTrack(row.track_id);
     if (!['forming', 'ready'].includes(row.status) || row.starts_at <= stamp()) throw new AppError(409, 'Recruitment has closed for this squad.', 'recruitment_closed');
     if (members(row.id).length >= 4) throw new AppError(409, 'This squad just filled up. Search for another squad.', 'squad_full');
     if (user.trackId !== row.track_id || user.level !== row.level || scheduleConflicts(user, meetingRows(row.sprint_id)).length) throw new AppError(409, 'This squad does not fit your track, level, or all eight meeting windows.', 'incompatible_schedule');
@@ -427,6 +439,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const state = transaction(() => {
         expireSearches();
         if (current(user.id)) return searchState(user.id);
+        requireActiveTrack(user.trackId);
         const existing = q('SELECT * FROM matchmaking_queue WHERE user_id=?', user.id);
         const expiresAt = new Date(now().getTime() + 120000).toISOString();
         if (pathname.endsWith('/poll')) {
@@ -444,9 +457,9 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, state);
     }
     if (method === 'PUT' && pathname === '/api/profile') {
-      const next = validateProfile(data);
       transaction(() => {
         const activeId = current(user.id);
+        const next = validateProfile(data, { allowedArchivedTrackId: activeId ? squadRow(activeId).track_id : undefined });
         if (activeId) {
           const active = squadRow(activeId);
           if (active.track_id !== next.trackId || active.level !== next.level) throw new AppError(409, 'Leave your current squad before changing track or level.', 'active_squad');
@@ -461,6 +474,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     }
     if (method === 'GET' && pathname === '/api/matches') {
       requireUser(user);
+      if (!current(user.id)) requireActiveTrack(user.trackId);
       const compatible = current(user.id) ? [] : all("SELECT q.*,s.id AS sprint_id,s.status,s.starts_at,s.ends_at,s.timezone,s.plan FROM squads q JOIN sprints s ON s.squad_id=q.id WHERE q.track_id=? AND q.level=? AND s.status IN ('forming','ready') ORDER BY s.starts_at,q.created_at", user.trackId, user.level).filter(row => {
         try { canJoin(user, row); return true; } catch (error) { if (error instanceof AppError) return false; throw error; }
       }).map(summary).sort((a, b) => Number(b.memberCount === 2) - Number(a.memberCount === 2) || a.startDate.localeCompare(b.startDate));
@@ -468,6 +482,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     }
     if (method === 'POST' && pathname === '/api/squads/preview') {
       requireUser(user);
+      requireActiveTrack(user.trackId);
       const preview = generateSchedule(user, data.slots, now());
       const tasks = trackById(user.trackId).weeks.flatMap(w => w.tasks);
       preview.meetings.forEach((meeting, i) => meeting.topic = tasks[i].title);
@@ -537,7 +552,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       rate(`ai-sprint:${row.sprint_id}`, 5, 3600000);
       aiPending.add(row.sprint_id);
       try {
-        const input = { trackId: row.track_id, track: trackById(row.track_id).title, level: row.level, project: trackById(row.track_id).project, durationWeeks: 4, meetingsPerWeek: 2, meetingMinutes: 50, independentHoursPerWeek: 2, weeks: existing.weeks, basePlan: existing };
+        const input = { trackId: row.track_id, track: trackById(row.track_id).title, category: trackById(row.track_id).category, prerequisite: trackById(row.track_id).prerequisite, level: row.level, project: trackById(row.track_id).project, durationWeeks: 4, meetingsPerWeek: 2, meetingMinutes: 50, independentHoursPerWeek: 2, weeks: existing.weeks, basePlan: existing };
         let timer;
         const result = await Promise.race([Promise.resolve().then(() => adapter(input)), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('AI timeout')), 22000); timer.unref?.(); })]).finally(() => clearTimeout(timer));
         const weeks = validateAIWeeks(result, existing.weeks);
@@ -545,7 +560,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
           refreshLifecycle(); authorizeMember(squadId, profile(user.id), true);
           if (started()) throw new AppError(409, 'Work started while adaptation was running. Your original plan is preserved.', 'plan_locked');
           if (JSON.parse(squadRow(squadId).plan).source === 'ai') return;
-          run('UPDATE sprints SET plan=? WHERE id=?', JSON.stringify({ source: 'ai', weeks }), row.sprint_id);
+          run('UPDATE sprints SET plan=? WHERE id=?', JSON.stringify({ ...existing, source: 'ai', weeks }), row.sprint_id);
           const meetings = meetingRows(row.sprint_id);
           weeks.flatMap(w => w.tasks).forEach((task, index) => run('UPDATE meetings SET topic=? WHERE id=?', task.title, meetings[index].id));
         });
