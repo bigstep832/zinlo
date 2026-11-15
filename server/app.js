@@ -13,6 +13,7 @@ import { createGoogleMeetService } from './google-meet.js';
 import { coursePreview, planAccess } from './progression.js';
 import { gradeQuiz } from './assessments.js';
 import { createVideoRooms } from './video-rooms.js';
+import { createChatAttachments } from './chat-attachments.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -87,6 +88,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(squad_id,user_id,client_id));
     CREATE TABLE IF NOT EXISTS chat_reads (squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), last_id INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(squad_id,user_id));
     CREATE INDEX IF NOT EXISTS chat_squad_id ON chat_messages(squad_id,id);
+    CREATE TABLE IF NOT EXISTS chat_attachments (id TEXT PRIMARY KEY, squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), message_id INTEGER REFERENCES chat_messages(id), name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS chat_attachment_message ON chat_attachments(message_id);
     CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS matchmaking_queue (user_id TEXT PRIMARY KEY REFERENCES users(id), state TEXT NOT NULL, queued_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS meeting_readiness (meeting_id TEXT NOT NULL REFERENCES meetings(id), user_id TEXT NOT NULL REFERENCES users(id), ready_at TEXT NOT NULL, PRIMARY KEY(meeting_id,user_id));
@@ -103,6 +106,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   const googleMeet = createGoogleMeetService({ db, now, config: googleMeetConfig, oauthClientFactory: googleOAuthClientFactory });
   const meetConfigured = typeof meetAdapter === 'function' || googleMeet.configured;
   const videoRoom = createVideoRooms({ authorizeMember, meetingReadiness, members, now, rate });
+  const chatAttachments = createChatAttachments({ q, all, run, now, rate, authorizeMember, currentUser: req => { refreshLifecycle(); return requireUser(userFromRequest(req), false); } });
   const aiPending = new Set();
   let closed = false;
   let inTransaction = false;
@@ -391,6 +395,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const method = req.method;
     const mutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method);
     if (mutation) validateOrigin(req);
+    const attachmentUpload = pathname.match(/^\/api\/squads\/([^/]+)\/chat\/attachments$/);
+    if (attachmentUpload && method === 'POST') return json(res, 201, { attachment: await chatAttachments.upload(req, attachmentUpload[1]) });
     if (pathname === '/api/profile/avatar' && method === 'PUT') {
       const owner = requireUser(userFromRequest(req), false);
       rate(`avatar:${owner.id}`, 12, 3600000);
@@ -434,6 +440,12 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, bootstrap(user));
     }
     requireUser(user, false);
+    if (attachmentUpload && method === 'GET') return json(res, 200, { attachments: chatAttachments.drafts(attachmentUpload[1], user) });
+    const attachmentRoute = pathname.match(/^\/api\/squads\/([^/]+)\/chat\/attachments\/([a-f0-9-]{36})$/);
+    if (attachmentRoute && ['GET', 'DELETE'].includes(method)) {
+      if (!chatAttachments.serve(req, res, attachmentRoute[1], attachmentRoute[2], user)) return json(res, 200, { ok: true });
+      return;
+    }
     if (method === 'GET' && pathname === '/api/cities') {
       rate(`cities:${user.id}`, 90, 60000);
       return json(res,200,{cities:searchCities(new URL(req.url,'http://localhost').searchParams.get('q') || '')});
@@ -484,7 +496,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const [, squadId, action] = chatRoute;
       const { row, membership } = authorizeMember(squadId, user, method === 'POST');
       if (!membership.active) throw new AppError(403, 'Chat is only available to current squad members.', 'forbidden');
-      const message = saved => ({ id: saved.id, userId: saved.user_id, name: profile(saved.user_id).name, avatarUrl: avatarUrl(saved.user_id), text: saved.text, createdAt: saved.created_at, clientId: saved.user_id === user.id ? saved.client_id : undefined });
+      const message = saved => ({ id: saved.id, userId: saved.user_id, name: profile(saved.user_id).name, avatarUrl: avatarUrl(saved.user_id), text: saved.text, attachments: chatAttachments.list(saved.id), createdAt: saved.created_at, clientId: saved.user_id === user.id ? saved.client_id : undefined });
       if (method === 'GET' && !action) {
         const params = new URL(req.url, 'http://localhost').searchParams;
         const before = params.get('before'), after = params.get('after');
@@ -495,17 +507,23 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
         return json(res, 200, { messages: page.map(message), hasMore: saved.length > 50, canSend: unfinished.includes(row.status) });
       }
       if (method === 'POST' && !action) {
-        const text = textField(data.text, 2000, 'Message', true);
+        const attachmentIds = chatAttachments.ids(data.attachments);
+        const text = textField(data.text ?? '', 2000, 'Message', !attachmentIds.length);
         const clientId = textField(data.clientId, 80, 'Message identifier', true);
         if (!/^[a-zA-Z0-9_-]{8,80}$/.test(clientId)) fail('Invalid message identifier.');
         const existing = q('SELECT * FROM chat_messages WHERE squad_id=? AND user_id=? AND client_id=?', squadId, user.id, clientId);
         if (existing) {
-          if (existing.text !== text) throw new AppError(409, 'This message identifier was already used. Start a new message.', 'duplicate_message');
+          if (existing.text !== text || JSON.stringify(chatAttachments.list(existing.id).map(item => item.id).sort()) !== JSON.stringify([...attachmentIds].sort())) throw new AppError(409, 'This message identifier was already used. Start a new message.', 'duplicate_message');
           return json(res, 200, { message: message(existing) });
         }
         rate(`chat:${user.id}`, 20, 60000);
-        const result = run('INSERT INTO chat_messages(squad_id,user_id,client_id,text,created_at) VALUES (?,?,?,?,?)', squadId, user.id, clientId, text, stamp());
-        return json(res, 201, { message: message(q('SELECT * FROM chat_messages WHERE id=?', Number(result.lastInsertRowid))) });
+        const messageId = transaction(() => {
+          const result = run('INSERT INTO chat_messages(squad_id,user_id,client_id,text,created_at) VALUES (?,?,?,?,?)', squadId, user.id, clientId, text, stamp());
+          const created = Number(result.lastInsertRowid);
+          chatAttachments.claim(attachmentIds, created, squadId, user.id);
+          return created;
+        });
+        return json(res, 201, { message: message(q('SELECT * FROM chat_messages WHERE id=?', messageId)) });
       }
       if (method === 'PUT' && action === 'read') {
         if (!Number.isSafeInteger(data.lastId) || data.lastId < 0 || data.lastId > 0 && !q('SELECT id FROM chat_messages WHERE squad_id=? AND id=?', squadId, data.lastId)) fail('Invalid last read message.');

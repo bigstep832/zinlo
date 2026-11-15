@@ -18,6 +18,7 @@ function VideoTile({ stream, name, avatarUrl, self, status, cameraOff = false })
 function CallControl({ label, icon: Icon, tone = '', ...props }) {
   return <span className="call-control-wrap"><button type="button" className={`call-icon ${tone}`} aria-label={label} title={label} {...props}><Icon size={20} strokeWidth={1.8} aria-hidden="true" /></button><span className="call-tooltip" aria-hidden="true">{label}</span></span>;
 }
+const mediaState = stream => Object.fromEntries(['audio', 'video'].map(kind => [kind, !!stream?.getTracks().some(track => track.kind === kind && track.readyState === 'live' && track.enabled)]));
 export function VideoRoom({ squadId, meetingId, api, onLeave }) {
   const [session, setSession] = useState(null), [state, setState] = useState(null), [stream, setStream] = useState(null);
   const [remote, setRemote] = useState({}), [connections, setConnections] = useState({}), [error, setError] = useState(''), [busy, setBusy] = useState(false);
@@ -33,7 +34,7 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
       if (polling || cancelled) return;
       polling = true;
       try {
-        const result = await api(`${path}/poll`, 'POST', { peerId: current.peerId, after: cursor.current });
+        const result = await api(`${path}/poll`, 'POST', { peerId: current.peerId, after: cursor.current, media: mediaState(local.current) });
         if (cancelled) return;
         setState(result);
         if (result.started && readyRef.current) {
@@ -58,27 +59,34 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
     window.addEventListener('pagehide', onExit);
     return () => { cancelled = true; live.current = false; clearInterval(timer); window.removeEventListener('pagehide', onExit); onExit(); sessionRef.current = null; };
   }, [squadId, meetingId, api, retry]);
-  async function enableMedia(video) {
+  async function enableMedia(kind) {
     const requestGeneration = generation.current;
+    let value, adopted = false;
     setBusy(true); setError('');
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access needs HTTPS and a supported browser.');
-      const value = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: video ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } } : false });
-      if (!live.current || requestGeneration !== generation.current || readyRef.current) { value.getTracks().forEach(track => track.stop()); return; }
-      const micEnabled = local.current?.getAudioTracks()[0]?.enabled ?? true;
-      value.getAudioTracks().forEach(track => { track.enabled = micEnabled; });
-      local.current?.getTracks().forEach(track => track.stop()); local.current = value; setStream(value); setMic(micEnabled); setCamera(video);
-    } catch (e) { if (live.current && requestGeneration === generation.current) setError(e.name === 'NotAllowedError' ? 'Camera or microphone permission was denied. Allow it in your browser, try microphone only, or join to listen.' : e.name === 'NotFoundError' ? 'No matching camera or microphone was found. You can join to listen.' : e.message); }
-    finally { if (live.current && requestGeneration === generation.current) setBusy(false); }
+      value = await navigator.mediaDevices.getUserMedia({ audio: kind === 'audio' ? { echoCancellation: true, noiseSuppression: true } : false, video: kind === 'video' ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } } : false });
+      if (!live.current || requestGeneration !== generation.current) return;
+      const track = value.getTracks().find(item => item.kind === kind);
+      if (!track) throw new Error('The device did not provide a media track. Try again.');
+      await mesh.current?.setTrack(kind, track);
+      if (!live.current || requestGeneration !== generation.current) return;
+      const old = local.current?.getTracks() || [];
+      local.current = new MediaStream([...old.filter(item => item.kind !== kind), track]);
+      old.filter(item => item.kind === kind).forEach(item => item.stop());
+      adopted = true; setStream(local.current); kind === 'audio' ? setMic(true) : setCamera(true);
+      track.onended = () => { if (live.current && local.current?.getTracks().includes(track)) { kind === 'audio' ? setMic(false) : setCamera(false); setStream(new MediaStream(local.current.getTracks())); } };
+    } catch (e) { if (live.current && requestGeneration === generation.current) setError(e.name === 'NotAllowedError' ? `Allow ${kind === 'audio' ? 'microphone' : 'camera'} access in your browser, then try again. You can keep listening.` : e.name === 'NotFoundError' ? `No ${kind === 'audio' ? 'microphone' : 'camera'} was found. Connect one and try again.` : e.message); }
+    finally { if (!adopted) value?.getTracks().forEach(track => track.stop()); if (live.current && requestGeneration === generation.current) setBusy(false); }
   }
   async function confirmReady() {
     setBusy(true); setError('');
-    try { const result = await api(`${path}/ready`, 'POST', { peerId: session.peerId, ready: true, after: cursor.current }); readyRef.current = true; setReady(true); setState(result); }
+    try { const result = await api(`${path}/ready`, 'POST', { peerId: session.peerId, ready: true, after: cursor.current, media: mediaState(local.current) }); readyRef.current = true; setReady(true); setState(result); }
     catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   function toggle(kind) { const value = kind === 'audio' ? !mic : !camera; local.current?.getTracks().filter(track => track.kind === kind).forEach(track => { track.enabled = value; }); kind === 'audio' ? setMic(value) : setCamera(value); }
-  const connected = Object.values(connections).filter(value => value === 'connected').length;
-  const hasAudio = !!stream?.getAudioTracks().length, hasVideo = !!stream?.getVideoTracks().length;
+  const connected = state?.participants.filter(person => person.present && person.peerId !== session?.peerId && connections[person.peerId] === 'connected').length || 0;
+  const hasAudio = !!stream?.getAudioTracks().some(track => track.readyState === 'live'), hasVideo = !!stream?.getVideoTracks().some(track => track.readyState === 'live');
   const inCall = ready && state?.started;
   const readyCount = state?.participants.filter(person => person.ready).length || 0;
   const needsReconnect = ended || Object.values(connections).some(value => ['failed', 'disconnected'].includes(value));
@@ -89,13 +97,13 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
     <div className="video-stage">
       <div className="video-grid">
         <VideoTile stream={stream} name={selfName} avatarUrl={state?.participants.find(person => person.peerId === session?.peerId)?.avatarUrl} self cameraOff={!camera} status={hasVideo && !camera ? 'Camera off' : ready ? 'Ready' : 'Your preview'} />
-        {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} status={connections[person.peerId] === 'connected' ? 'Connected' : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
+        {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} cameraOff={person.media?.video === false} status={connections[person.peerId] === 'connected' ? (person.media?.video === false ? 'Camera off' : 'Connected') : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
       </div>
       <div className="call-controls" role="group" aria-label="Call controls">
         <p className={`call-status${inCall ? ' call-status-live' : ''}`} role="status"><span className="call-status-dot" aria-hidden="true" />{ended ? 'Call disconnected' : !state ? 'Opening room…' : inCall ? `${connected} connected` : `${readyCount} of ${state.participants.length} ready`}</p>
         <div className="call-actions">
-          <CallControl label={hasAudio ? (mic ? 'Mute microphone' : 'Unmute microphone') : 'Enable microphone'} icon={hasAudio && mic ? Mic : MicOff} tone={!hasAudio || !mic ? 'call-device-off' : ''} aria-pressed={hasAudio && mic} disabled={busy || !session || ended || (ready && !hasAudio)} onClick={() => hasAudio ? toggle('audio') : enableMedia(false)} />
-          <CallControl label={hasVideo ? (camera ? 'Turn camera off' : 'Turn camera on') : 'Enable camera and microphone'} icon={hasVideo && camera ? Video : VideoOff} tone={!hasVideo || !camera ? 'call-device-off' : ''} aria-pressed={hasVideo && camera} disabled={busy || !session || ended || (ready && !hasVideo)} onClick={() => hasVideo ? toggle('video') : enableMedia(true)} />
+          <CallControl label={hasAudio ? (mic ? 'Mute microphone' : 'Unmute microphone') : 'Enable microphone'} icon={hasAudio && mic ? Mic : MicOff} tone={!hasAudio || !mic ? 'call-device-off' : ''} aria-pressed={hasAudio && mic} disabled={busy || !session || ended} onClick={() => hasAudio ? toggle('audio') : enableMedia('audio')} />
+          <CallControl label={hasVideo ? (camera ? 'Turn camera off' : 'Turn camera on') : 'Enable camera'} icon={hasVideo && camera ? Video : VideoOff} tone={!hasVideo || !camera ? 'call-device-off' : ''} aria-pressed={hasVideo && camera} disabled={busy || !session || ended} onClick={() => hasVideo ? toggle('video') : enableMedia('video')} />
           <span className="call-divider" aria-hidden="true" />
           {!ready && !ended && <button className="call-ready" disabled={busy || !session} onClick={confirmReady}><Check size={17} aria-hidden="true" />{busy ? 'One moment…' : 'I’m ready'}</button>}
           {ready && !inCall && !ended && <span className="call-confirmed"><Check size={17} aria-hidden="true" />Ready</span>}
@@ -104,7 +112,7 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
         </div>
       </div>
     </div>
-    <p className="room-hint">{!ready ? 'Turn on your mic or camera, or join to listen. The call starts when everyone is ready.' : !stream ? 'Listening only. Leave and rejoin to enable your mic or camera.' : !inCall ? 'You’re ready. Your mic and camera are shared when everyone joins.' : 'Leave the call any time to return to your squad.'}</p>
+    <p className="room-hint">{!ready ? 'Turn on your mic or camera, or join to listen. The call starts when everyone is ready.' : !stream ? 'Listening only. You can enable your mic or camera at any time.' : !inCall ? 'You’re ready. Your mic and camera are shared when everyone joins.' : 'Use the mic and camera buttons any time. Leave the call to return to your squad.'}</p>
     <details className="room-help"><summary>Call details</summary><p>This site does not record calls. Camera and microphone access starts only when you enable it.</p>{session && !session.relayConfigured && <p>If your network blocks the call, try another network or Google Meet from the Meetings page.</p>}</details>
   </section>;
 }

@@ -2,6 +2,7 @@
 export class SquadVideoMesh {
   constructor({ peerId, iceServers, stream, signal, onStream, onState, onError, iceTransportPolicy = 'all' }) {
     Object.assign(this, { peerId, iceServers, stream, signal, onStream, onState, onError, iceTransportPolicy });
+    this.stream = new MediaStream(stream?.getTracks() || []);
     this.peers = new Map(); this.closed = false;
   }
   create(id) {
@@ -9,7 +10,9 @@ export class SquadVideoMesh {
     const pc = new RTCPeerConnection({ iceServers: this.iceServers, iceTransportPolicy: this.iceTransportPolicy });
     const entry = { pc, candidates: [], queue: Promise.resolve(), makingOffer: false };
     this.peers.set(id, entry);
-    for (const track of this.stream?.getTracks() || []) pc.addTrack(track, this.stream);
+    // The offerer reserves both media sections even for a listen-only join.
+    // The answerer adopts these sections after receiving the offer.
+    if (this.peerId < id) for (const kind of ['audio', 'video']) pc.addTransceiver(this.stream.getTracks().find(track => track.kind === kind) || kind, { direction: 'sendrecv', streams: [this.stream] });
     const send = value => { entry.queue = entry.queue.then(() => this.closed ? undefined : this.signal(id, value)).catch(error => { if (!this.closed && this.peers.has(id)) this.onError(error); }); };
     entry.send = send;
     pc.onicecandidate = event => { if (event.candidate) send({ type: 'candidate', candidate: event.candidate.toJSON() }); };
@@ -22,13 +25,12 @@ export class SquadVideoMesh {
     if (entry.makingOffer || entry.pc.signalingState !== 'stable') return;
     entry.makingOffer = true;
     try {
-      for (const kind of ['audio', 'video']) if (!entry.pc.getTransceivers().some(item => item.receiver.track.kind === kind)) entry.pc.addTransceiver(kind, { direction: 'recvonly' });
       await entry.pc.setLocalDescription(await entry.pc.createOffer()); entry.send({ type: 'offer', sdp: entry.pc.localDescription.sdp });
     }
     finally { entry.makingOffer = false; }
   }
   async sync(ids) {
-    for (const [id, entry] of this.peers) if (!ids.includes(id)) { entry.pc.close(); this.peers.delete(id); this.onStream(id, null); }
+    for (const [id, entry] of this.peers) if (!ids.includes(id)) { entry.pc.close(); this.peers.delete(id); this.onStream(id, null); this.onState(id, 'closed'); }
     for (const id of ids) if (id !== this.peerId && !this.peers.has(id)) { this.create(id); if (this.peerId < id) await this.offer(id); }
   }
   async receive(from, signal) {
@@ -40,7 +42,29 @@ export class SquadVideoMesh {
     }
     await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
     for (const candidate of entry.candidates.splice(0)) await pc.addIceCandidate(candidate);
-    if (signal.type === 'offer') { await pc.setLocalDescription(await pc.createAnswer()); entry.send({ type: 'answer', sdp: pc.localDescription.sdp }); }
+    if (signal.type === 'offer') {
+      for (const transceiver of pc.getTransceivers()) {
+        transceiver.direction = 'sendrecv';
+        transceiver.sender.setStreams(this.stream);
+        await transceiver.sender.replaceTrack(this.stream.getTracks().find(track => track.kind === transceiver.receiver.track.kind) || null);
+      }
+      await pc.setLocalDescription(await pc.createAnswer()); entry.send({ type: 'answer', sdp: pc.localDescription.sdp });
+    }
+  }
+  async setTrack(kind, track) {
+    if (this.closed) throw new Error('The call has ended.');
+    const previous = this.stream.getTracks().find(item => item.kind === kind) || null;
+    if (previous) this.stream.removeTrack(previous);
+    if (track) this.stream.addTrack(track);
+    const senders = [...this.peers.values()].flatMap(({ pc }) => pc.getTransceivers().filter(item => item.receiver.track.kind === kind).map(item => ({ pc, sender: item.sender })));
+    const outcomes = await Promise.allSettled(senders.map(({ pc, sender }) => pc.connectionState === 'closed' ? undefined : sender.replaceTrack(track)));
+    const failure = outcomes.find((result, i) => result.status === 'rejected' && senders[i].pc.connectionState !== 'closed');
+    if (failure) {
+      if (track) this.stream.removeTrack(track);
+      if (previous) this.stream.addTrack(previous);
+      await Promise.allSettled(senders.map(({ sender }) => sender.replaceTrack(previous)));
+      throw failure.reason;
+    }
   }
   close() { this.closed = true; for (const entry of this.peers.values()) entry.pc.close(); this.peers.clear(); }
 }

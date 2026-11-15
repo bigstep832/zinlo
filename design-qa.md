@@ -69,3 +69,13 @@ User-directed redesign retains the blue visual language. Reviewed desktop 1440 p
 - New scenario tab produced no JavaScript console errors. All 85 server tests passed; production build succeeded.
 
 Pricing and proposed future team/refund policy are documented in README. No real payments, monetary penalties, automatic refunds or moderation system were introduced.
+
+
+## Zinlo collaboration update
+
+- Three generated participants used the real VideoRoom component and authenticated signalling through the configured Cloudflare relay. The local learner joined without devices, enabled a microphone after the call started, muted it, enabled a camera without unmuting the microphone, then toggled both devices off and on again. All remote peer connections inspected were connected with relay candidates and decoded the new video; audio RTP bytes arrived. No physical camera/microphone was accessed.
+- The local video element and its tile both measured 520×180 in the desktop fixture, with cover fit. Camera-off displayed an avatar; leaving closed the local media session. Evidence: `evidence/zinlo-call.png`.
+- The real TeamChat component uploaded a generated PNG and text file through the file chooser, showed previews, posted both with Enter, downloaded the text file and sent another photo without text. Both messages and their images survived reload. Mobile layout was checked at 390 CSS pixels without document overflow; all attachment images loaded. Evidence: `evidence/zinlo-chat-mobile.png`.
+- Full server suite: 89 passing tests. Production build successful. Existing branding is now Zinlo; technical persistence keys are preserved.
+
+The built application also uploaded both fixtures inside the existing assessment squad, sent them using Enter, and displayed the saved photo/file beside the normal sidebar navigation. No browser console errors were reported. Evidence: `evidence/zinlo-chat.png`. Published page title/header/footer and favicon were verified after restart; existing four squad plans and one Meet link were preserved. GitHub repository renamed to `bigstep832/zinlo`, retaining private visibility.

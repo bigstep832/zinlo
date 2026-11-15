@@ -1,17 +1,17 @@
 # Connect Google Meet
 
-Learning Squads creates one real Google Meet conference for a meeting after every current squad member confirms readiness. One current member connects their Google account as the organizer. Other members do not need to connect Google to Learning Squads. Google Meet itself controls its sign-in, admission, microphone and camera prompts.
+Zinlo creates one real Google Meet conference for a meeting after every current squad member confirms readiness. One current member connects their Google account as the organizer. Other members do not need to connect Google to Zinlo. Google Meet itself controls its sign-in, admission, microphone and camera prompts.
 
 Without Google configuration, readiness still works, but the app explains that automatic conference creation needs setup. It never generates a random meeting code or claims an uncreated conference exists.
 
 ## Google Cloud setup
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/). Complete Google's account requirements yourself, including terms and two-step verification if requested.
-2. Create a project named **Learning Squads**.
+2. Create a project named **Zinlo**.
 3. Enable **Google Meet API** in APIs & Services → Library.
-4. Configure Google Auth Platform (OAuth consent). Use **Learning Squads** as the application name, choose your support/contact email, and use **External / Testing** for the initial personal-account test.
+4. Configure Google Auth Platform (OAuth consent). Use **Zinlo** as the application name, choose your support/contact email, and use **External / Testing** for the initial personal-account test.
 5. Add the organizer's Google account as a test user. You do not need to add every learner if only one person connects Google as organizer.
-6. Create an OAuth client of type **Web application**, named **Learning Squads Web**. Register the exact callback of the running server: `https://YOUR-HOST/api/google-meet/callback`. For local development, use `http://localhost:3001/api/google-meet/callback` and open the app on that same hostname.
+6. Create an OAuth client of type **Web application**, named **Zinlo Web**. Register the exact callback of the running server: `https://YOUR-HOST/api/google-meet/callback`. For local development, use `http://localhost:3001/api/google-meet/callback` and open the app on that same hostname.
 7. Download the OAuth client JSON into a private local directory outside the repository. Do not paste its contents into chat, GitHub, browser code or a shared document.
 
 The application requests only `https://www.googleapis.com/auth/meetings.space.created`, which covers conferences it creates. It does not request Gmail, Calendar, Drive, recordings or existing Meet history.
@@ -31,11 +31,11 @@ Production HTTPS also needs `APP_ORIGIN` set to the exact public origin and secu
 3. Each member selects **I'm ready** under the nearest meeting and confirms they are ready to join now. Confirmation opens a separate waiting tab and keeps the squad workspace open.
 4. When all current members are ready, the server creates and saves one conference. The waiting tab automatically opens that same Meet URL. Close the Meet tab after the call to return to the existing squad workspace. If the browser blocks the new tab, use the visible meeting button to open it manually.
 
-Google Meet does not send its **Leave call** event to Learning Squads. The site does not claim to detect that action or redirect the Google page after the call. Keeping the workspace open in the original tab provides the return path.
+Google Meet does not send its **Leave call** event to Zinlo. The site does not claim to detect that action or redirect the Google page after the call. Keeping the workspace open in the original tab provides the return path.
 
 Members can withdraw readiness while waiting. A new member must confirm independently. Each meeting has separate readiness. Provider errors remain visible and can be retried; Google credentials never go to other squad members.
 
-New conferences explicitly use Google's **Open** access mode so participants with the Meet link can enter without requesting admission. This means anyone who receives the link can join, not only Learning Squads members. The application still reveals the upcoming meeting link only to current members after everyone confirms readiness. Other Google host and organization policies remain in effect; the app does not change them. See [Google meeting access settings](https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces#SpaceConfig).
+New conferences explicitly use Google's **Open** access mode so participants with the Meet link can enter without requesting admission. This means anyone who receives the link can join, not only Zinlo members. The application still reveals the upcoming meeting link only to current members after everyone confirms readiness. Other Google host and organization policies remain in effect; the app does not change them. See [Google meeting access settings](https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces#SpaceConfig).
 
 ## Temporary preview and testing limits
 

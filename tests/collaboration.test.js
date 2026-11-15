@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
 import { createApp } from '../server/app.js';
+import sharp from 'sharp';
 
 const initialTime = '2026-11-15T12:00:00.000Z';
 const slots = [{ day: 2, start: '19:00' }, { day: 4, start: '19:00' }];
@@ -35,6 +36,9 @@ async function fixture(t, options = {}) {
   function client() {
     let cookie = '';
     return {
+      binary(path, method = 'GET', body, headers = {}) {
+        return fetch(base + path, { method, signal: AbortSignal.timeout(8000), headers: { origin: base, ...(cookie ? { cookie } : {}), ...headers }, ...(body === undefined ? {} : { body }) });
+      },
       async request(path, method = 'GET', data) {
         const response = await fetch(base + path, {
           method, signal: AbortSignal.timeout(8000),
@@ -151,3 +155,73 @@ test('video replaces a duplicate tab, expires absent sessions and does not persi
 function noUpcomingUrl(detail, meetingId) {
   assert.ok(!getMeeting(detail, meetingId).meetUrl, 'The conference URL must remain hidden until every current member is ready');
 }
+
+async function uploadFile(person, squadId, name = 'notes.txt', data = Buffer.from('Week one notes'), mime = 'text/plain') {
+  return person.binary(`/api/squads/${squadId}/chat/attachments`, 'POST', data, { 'content-type': mime, 'x-file-name': encodeURIComponent(name) });
+}
+test('attachments are private drafts, shared only after sending, retry-safe and persistent', async t => {
+  const f = await fixture(t), { people: [a,b], id } = await team(f), outsider = await f.guest('Outside');
+  const path = `/api/squads/${id}/chat`;
+  const upload = await uploadFile(a,id); assert.equal(upload.status,201);
+  const { attachment } = await upload.json();
+  assert.equal((await a.binary(attachment.url)).status,200);
+  assert.equal((await b.binary(attachment.url)).status,404);
+  assert.equal((await outsider.binary(attachment.url)).status,403);
+  assert.equal((await uploadFile(outsider,id)).status,403);
+  rejected(await b.request(path,'POST',{clientId:'steal-file',attachments:[attachment.id]}));
+  assert.equal((await a.ok(path)).messages.length,0);
+  const payload = {clientId:'with-file-1',text:'',attachments:[attachment.id]};
+  const sent = await a.ok(path,'POST',payload);
+  assert.equal(sent.message.attachments.length,1);
+  assert.equal((await a.ok(path,'POST',payload)).message.id,sent.message.id);
+  assert.equal((await a.request(path,'POST',{...payload,attachments:[]})).status,400);
+  const download = await b.binary(attachment.url);
+  assert.match(download.headers.get('content-disposition'),/^attachment/);
+  assert.equal(await download.text(),'Week one notes');
+  assert.equal((await a.request(attachment.url,'DELETE',{})).status,403);
+  await f.restart();
+  assert.equal((await b.ok(path)).messages[0].attachments[0].name,'notes.txt');
+  assert.equal((await a.ok(`${path}/attachments`)).attachments.length,0);
+  await b.ok(`/api/squads/${id}/leave`,'POST',{});
+  assert.equal((await b.binary(attachment.url)).status,403);
+});
+test('photo attachments are decoded and stripped; active content always downloads', async t => {
+  const f=await fixture(t),{people:[a,b],id}=await team(f);
+  const photo=await sharp({create:{width:2400,height:1200,channels:3,background:'#2451ea'}}).png().toBuffer();
+  const uploaded=await uploadFile(a,id,'photo.png',photo,'image/png'); assert.equal(uploaded.status,201);
+  const {attachment}=await uploaded.json(); assert.equal(attachment.mime,'image/webp');
+  await a.ok(`/api/squads/${id}/chat`,'POST',{clientId:'photo-001',attachments:[attachment.id]});
+  const response=await b.binary(attachment.url), meta=await sharp(Buffer.from(await response.arrayBuffer())).metadata();
+  assert.equal(meta.width,2000);assert.equal(meta.height,1000);assert.equal(meta.exif,undefined);
+  assert.match(response.headers.get('content-disposition'),/^inline/);
+  assert.match((await b.binary(`${attachment.url}?download=1`)).headers.get('content-disposition'),/^attachment/);
+  const malicious=await uploadFile(a,id,'sample.html',Buffer.from('<script>alert(1)</script>'),'text/html');
+  const html=(await malicious.json()).attachment; const htmlResponse=await a.binary(html.url);
+  assert.equal(htmlResponse.headers.get('content-type'),'application/octet-stream');assert.match(htmlResponse.headers.get('content-security-policy'),/sandbox/);
+  assert.equal((await uploadFile(a,id,'fake.png',Buffer.from('not an image'),'image/png')).status,400);
+});
+test('attachment limits, removal, atomic ownership and completed course access are enforced', async t => {
+  const f=await fixture(t),{people:[a,b],id}=await team(f),path=`/api/squads/${id}/chat`;
+  const files=[]; for(let i=0;i<3;i++) files.push((await (await uploadFile(a,id,`notes-${i}.txt`)).json()).attachment);
+  assert.equal((await uploadFile(a,id)).status,409);
+  assert.equal((await uploadFile(a,id,'large.bin',Buffer.alloc(10*1024*1024+1))).status,413);
+  assert.equal((await a.ok(`${path}/attachments`)).attachments.length,3);
+  rejected(await a.request(path,'POST',{clientId:'bad-batch',attachments:[files[0].id,'00000000-0000-4000-8000-000000000000']}));
+  assert.equal((await a.ok(`${path}/attachments`)).attachments.length,3);
+  assert.equal((await b.request(files[0].url,'DELETE',{})).status,404);
+  await a.ok(files[2].url,'DELETE',{});assert.equal((await a.binary(files[2].url)).status,404);
+  await a.ok(path,'POST',{clientId:'good-batch',attachments:files.slice(0,2).map(file=>file.id)});
+  f.setTime('2027-01-01T12:00:00Z');
+  assert.equal((await uploadFile(a,id)).status,403);
+  assert.equal((await a.binary(files[0].url)).status,200);
+});
+test('camera and microphone state updates remain per peer after call start', async t => {
+  const f=await fixture(t),{people,id,meetingId}=await team(f),path=`/api/squads/${id}/meetings/${meetingId}/video`;
+  const sessions=await Promise.all(people.map(p=>p.ok(`${path}/join`,'POST',{})));
+  for(let i=0;i<3;i++) await people[i].ok(`${path}/ready`,'POST',{peerId:sessions[i].peerId,ready:true,media:{audio:false,video:false}});
+  await people[0].ok(`${path}/poll`,'POST',{peerId:sessions[0].peerId,media:{audio:true,video:false}});
+  const state=await people[1].ok(`${path}/poll`,'POST',{peerId:sessions[1].peerId});
+  assert.equal(state.started,true);
+  assert.deepEqual(state.participants.find(p=>p.peerId===sessions[0].peerId).media,{audio:true,video:false});
+  rejected(await people[0].request(`${path}/poll`,'POST',{peerId:sessions[0].peerId,media:{audio:'yes'}}));
+});
