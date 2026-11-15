@@ -1,3 +1,4 @@
+import { passQuiz } from './assessment-helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -120,6 +121,7 @@ test('existing archived AI squad keeps its original plan, work, meeting link and
   const oldPlan = basePlan('ai', 'basics'); delete oldPlan.level;
   oldPlan.weeks[0].preparation = 'Original saved AI instructions; never replace these.';
   const taskId = oldPlan.weeks[0].tasks[0].id;
+  await passQuiz(people[0], id, taskId);
   await people[0].ok(`/api/squads/${id}/progress/${taskId}`, 'PUT', { status: 'done', note: 'My existing task planner result', url: 'https://example.com/old-planner' });
   await people[0].ok(`/api/squads/${id}/meetings/${meetingId}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' });
   for (const person of people) await person.ok(`/api/squads/${id}/meetings/${meetingId}/readiness`, 'PUT', { ready: true });
@@ -173,6 +175,7 @@ test('removed JavaScript releases old members, hides history and preserves their
   const id = await createSquad(people[0]);
   for (const person of people.slice(1)) await person.ok(`/api/squads/${id}/join`, 'POST', {});
   const before = await dashboard(people[0], id), meetingId = before.meetings[0].id;
+  await passQuiz(people[0], id, 'week-1-task-1');
   await people[0].ok(`/api/squads/${id}/progress/week-1-task-1`, 'PUT', { status: 'done', note: 'Saved original work', url: '' });
   await people[0].ok(`/api/squads/${id}/meetings/${meetingId}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' });
   const waiting = await f.guest('Removed waiting learner');

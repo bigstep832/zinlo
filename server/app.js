@@ -9,6 +9,7 @@ import { AppError, fail, validateProfile, generateSchedule, scheduleConflicts, c
 import { findAutomaticGroup, hasSeparateMeetingDays } from './matchmaking.js';
 import { createGoogleMeetService } from './google-meet.js';
 import { coursePreview, planAccess } from './progression.js';
+import { gradeQuiz } from './assessments.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -75,6 +76,10 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     CREATE TABLE IF NOT EXISTS memberships (squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), active INTEGER NOT NULL DEFAULT 1, joined_at TEXT NOT NULL, left_at TEXT, PRIMARY KEY(squad_id,user_id));
     CREATE TABLE IF NOT EXISTS meetings (id TEXT PRIMARY KEY, sprint_id TEXT NOT NULL REFERENCES sprints(id), starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, window_ends_at TEXT NOT NULL, topic TEXT NOT NULL, week INTEGER NOT NULL, meet_url TEXT NOT NULL DEFAULT '', organizer_id TEXT REFERENCES users(id));
     CREATE TABLE IF NOT EXISTS progress (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), task_id TEXT NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', PRIMARY KEY(sprint_id,user_id,task_id));
+    CREATE TABLE IF NOT EXISTS quiz_results (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), task_id TEXT NOT NULL, answers TEXT NOT NULL, score INTEGER NOT NULL, total INTEGER NOT NULL, passed INTEGER NOT NULL, attempts INTEGER NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(sprint_id,user_id,task_id));
+    CREATE TABLE IF NOT EXISTS weekly_submissions (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), week INTEGER NOT NULL, status TEXT NOT NULL, text TEXT NOT NULL, url TEXT NOT NULL, checked TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(sprint_id,user_id,week));
+    CREATE TABLE IF NOT EXISTS learning_credits (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), item_id TEXT NOT NULL, PRIMARY KEY(sprint_id,user_id,item_id));
+    CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS matchmaking_queue (user_id TEXT PRIMARY KEY REFERENCES users(id), state TEXT NOT NULL, queued_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS meeting_readiness (meeting_id TEXT NOT NULL REFERENCES meetings(id), user_id TEXT NOT NULL REFERENCES users(id), ready_at TEXT NOT NULL, PRIMARY KEY(meeting_id,user_id));
@@ -128,6 +133,18 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       run('DELETE FROM matchmaking_queue WHERE user_id=?', person.id);
     }
     retireArchivedSearches();
+    if (!q("SELECT id FROM schema_migrations WHERE id='required-assessments-v1'")) {
+      // Credit completed work once. A restart must never turn new unchecked work
+      // into a pass or reopen a previously completed week for existing learners.
+      for (const saved of all("SELECT sprint_id,user_id,task_id FROM progress WHERE status='done'")) {
+        run('INSERT OR IGNORE INTO learning_credits VALUES (?,?,?)', saved.sprint_id, saved.user_id, `lesson:${saved.task_id}`);
+      }
+      for (const saved of all("SELECT sprint_id,user_id,task_id FROM progress WHERE status='done' AND task_id LIKE 'week-%-task-2'")) {
+        const week = Number(saved.task_id.split('-')[1]);
+        if (q("SELECT 1 FROM progress WHERE sprint_id=? AND user_id=? AND task_id=? AND status='done'", saved.sprint_id, saved.user_id, `week-${week}-task-1`)) run('INSERT OR IGNORE INTO learning_credits VALUES (?,?,?)', saved.sprint_id, saved.user_id, `assignment:${week}`);
+      }
+      run('INSERT INTO schema_migrations VALUES (?,?)', 'required-assessments-v1', stamp());
+    }
   });
   function rate(key, limit, duration) {
     const time = now().getTime();
@@ -286,14 +303,24 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const roster = members(squadId, true, user.id);
     const progress = results(row.sprint_id, user.id, plan);
     const canEdit = !!membership.active && unfinished.includes(row.status);
-    const learning = planAccess({ plan, progress, squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), now: now(), canEdit });
+    const learning = learningState(row, user.id, canEdit, plan);
     const connection = { configured: meetConfigured, connected: !!meetAdapter || googleMeet.connected(user.id), organizerAvailable: !!meetingOrganizer(squadId), ...(!meetConfigured ? { message: 'Automatic Google Meet is not configured on this installation yet.' } : {}) };
     const meetings = meetingRows(row.sprint_id, true).map(meeting => {
       const readiness = meetingReadiness(row, meeting.id, user.id, !!membership.active);
       const past = meeting.endsAt <= stamp();
       return { ...meeting, meetUrl: past || (membership.active && readiness.allReady && readiness.status === 'ready') ? meeting.meetUrl : '', readiness };
     });
-    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }) }; }), isMember: !!membership.active, canEdit };
+    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }), assignments: assignmentResults(row.sprint_id, m.id).filter(result => result.status === 'submitted').map(result => learning.accessByAssignment.get(result.week)?.unlocked ? result : { week: result.week, status: result.status, locked: true }) }; }), isMember: !!membership.active, canEdit };
+  }
+  function assignmentResults(sprintId, userId) {
+    return all('SELECT * FROM weekly_submissions WHERE sprint_id=? AND user_id=? ORDER BY week', sprintId, userId).map(saved => ({ week: saved.week, status: saved.status, text: saved.text, url: saved.url, checkedCriteria: JSON.parse(saved.checked), updatedAt: saved.updated_at }));
+  }
+  function learningState(row, userId, canEdit, plan = withLessonMaterials(JSON.parse(row.plan), row.track_id)) {
+    const quizResults = all('SELECT * FROM quiz_results WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(saved => {
+      const answers = JSON.parse(saved.answers), quiz = plan.weeks.flatMap(week => week.tasks).find(task => task.id === saved.task_id)?.quiz;
+      return { taskId: saved.task_id, answers, score: saved.score, total: saved.total, passed: !!saved.passed, attempts: saved.attempts, updatedAt: saved.updated_at, feedback: quiz ? gradeQuiz(quiz, answers)?.feedback || [] : [] };
+    });
+    return planAccess({ plan, progress: results(row.sprint_id, userId, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), quizResults, assignments: assignmentResults(row.sprint_id, userId), credits: all('SELECT item_id FROM learning_credits WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(item => item.item_id), now: now(), canEdit });
   }
   function meetingOrganizer(squadId) {
     return members(squadId).find(member => !!meetAdapter || googleMeet.connected(member.id))?.id || null;
@@ -517,7 +544,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       });
       return json(res, 201, created);
     }
-    const match = pathname.match(/^\/api\/squads\/([^/]+)(?:\/(join|leave|adapt|meetings|progress)(?:\/([^/]+))?)?$/);
+    const match = pathname.match(/^\/api\/squads\/([^/]+)(?:\/(join|leave|adapt|meetings|progress|quizzes|assignments)(?:\/([^/]+))?)?$/);
     if (!match) throw new AppError(404, 'Endpoint not found.', 'not_found');
     const [, squadId, action, resourceId] = match;
     if (method === 'GET' && !action) return json(res, 200, dashboard(squadId, user));
@@ -555,19 +582,61 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const url = resultUrl(data.url);
       transaction(() => {
         const { row } = authorizeMember(squadId, user, true);
-        const plan = JSON.parse(row.plan);
-        const access = planAccess({ plan, progress: results(row.sprint_id, user.id, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), now: now(), canEdit: true }).accessByTask.get(resourceId);
+        const learning = learningState(row, user.id, true);
+        const access = learning.accessByTask.get(resourceId);
         if (!access) throw new AppError(404, 'Task not found.', 'not_found');
         if (!access.canEdit) throw new AppError(409, access.message || 'This lesson is not available yet.', 'lesson_locked', { access });
+        const task = learning.plan.weeks.flatMap(week => week.tasks).find(task => task.id === resourceId);
+        if (data.status === 'done' && task.quiz && !task.quiz.credited && !task.quiz.result?.passed) throw new AppError(409, 'Pass this lesson’s quiz before marking it complete.', 'quiz_required');
         run('INSERT INTO progress(sprint_id,user_id,task_id,status,note,url) VALUES (?,?,?,?,?,?) ON CONFLICT(sprint_id,user_id,task_id) DO UPDATE SET status=excluded.status,note=excluded.note,url=excluded.url', row.sprint_id, user.id, resourceId, data.status, note, url);
       });
       return json(res, 200, { ok: true });
+    }
+    if (method === 'POST' && action === 'quizzes' && resourceId) {
+      const result = transaction(() => {
+        const { row } = authorizeMember(squadId, user, true);
+        const plan = withLessonMaterials(JSON.parse(row.plan), row.track_id);
+        const task = plan.weeks.flatMap(week => week.tasks).find(task => task.id === resourceId);
+        if (!task?.quiz) throw new AppError(404, 'Quiz not found.', 'not_found');
+        const access = learningState(row, user.id, true, plan).accessByTask.get(resourceId);
+        if (!access?.canEdit) throw new AppError(409, access?.message || 'This lesson is not available yet.', 'lesson_locked');
+        const graded = gradeQuiz(task.quiz, data.answers);
+        if (!graded) fail('Choose one valid answer for every quiz question.');
+        const previous = q('SELECT passed FROM quiz_results WHERE sprint_id=? AND user_id=? AND task_id=?', row.sprint_id, user.id, resourceId);
+        if (!previous?.passed) {
+          rate(`quiz:${user.id}`, 40, 300000);
+          run('INSERT INTO quiz_results VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(sprint_id,user_id,task_id) DO UPDATE SET answers=excluded.answers,score=excluded.score,total=excluded.total,passed=excluded.passed,attempts=quiz_results.attempts+1,updated_at=excluded.updated_at', row.sprint_id, user.id, resourceId, JSON.stringify(data.answers), graded.score, graded.total, Number(graded.passed), 1, stamp());
+        }
+        if (previous?.passed || graded.passed) run("INSERT INTO progress(sprint_id,user_id,task_id,status) VALUES (?,?,?,'done') ON CONFLICT(sprint_id,user_id,task_id) DO UPDATE SET status='done'", row.sprint_id, user.id, resourceId);
+        return learningState(row, user.id, true, plan).plan.weeks.flatMap(week => week.tasks).find(task => task.id === resourceId).quiz.result;
+      });
+      return json(res, 200, result);
+    }
+    if (method === 'PUT' && action === 'assignments' && resourceId) {
+      if (!/^[1-4]$/.test(resourceId)) fail('Choose a valid week.');
+      const week = Number(resourceId);
+      if (!['draft', 'submitted'].includes(data.status)) fail('Choose draft or submitted.');
+      const text = textField(data.text ?? '', 12000, 'Your assignment');
+      const url = resultUrl(data.url);
+      transaction(() => {
+        const { row } = authorizeMember(squadId, user, true);
+        const learning = learningState(row, user.id, true);
+        const assignment = learning.plan.weeks.find(item => item.week === week)?.assignment;
+        if (!assignment) throw new AppError(404, 'Assignment not found.', 'not_found');
+        if (!assignment.access.canEdit) throw new AppError(409, assignment.access.message, 'assignment_locked');
+        const checked = data.checkedCriteria;
+        if (!Array.isArray(checked) || new Set(checked).size !== checked.length || checked.some(id => !assignment.checklist.some(item => item.id === id))) fail('Use the assignment’s checklist items.');
+        if (data.status === 'submitted' && (text.length < 40 || checked.length !== assignment.checklist.length)) fail('Add at least 40 characters describing your work and confirm every checklist item before submitting.');
+        if (assignment.result?.status === 'submitted' && data.status !== 'submitted') throw new AppError(409, 'This work is already submitted. You can update the submitted version.', 'assignment_submitted');
+        run('INSERT INTO weekly_submissions VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(sprint_id,user_id,week) DO UPDATE SET status=excluded.status,text=excluded.text,url=excluded.url,checked=excluded.checked,updated_at=excluded.updated_at', row.sprint_id, user.id, week, data.status, text, url, JSON.stringify(checked), stamp());
+      });
+      return json(res, 200, { ok: true, status: data.status });
     }
     if (method === 'POST' && action === 'adapt') {
       const { row } = authorizeMember(squadId, user, true);
       const existing = withLessonMaterials(JSON.parse(row.plan), row.track_id);
       if (existing.source === 'ai') return json(res, 200, { source: 'ai', message: 'This saved plan is already AI-adapted.' });
-      const started = () => q("SELECT COUNT(*) AS n FROM progress WHERE sprint_id=? AND (status != 'not_started' OR note != '' OR url != '')", row.sprint_id).n > 0;
+      const started = () => q("SELECT COUNT(*) AS n FROM progress WHERE sprint_id=? AND (status != 'not_started' OR note != '' OR url != '')", row.sprint_id).n > 0 || q('SELECT COUNT(*) AS n FROM quiz_results WHERE sprint_id=?', row.sprint_id).n > 0 || q('SELECT COUNT(*) AS n FROM weekly_submissions WHERE sprint_id=?', row.sprint_id).n > 0;
       if (started()) throw new AppError(409, 'Work has already started. The saved plan will stay unchanged.', 'plan_locked');
       if (!adapter) return json(res, 200, { source: 'base', message: 'AI adaptation is not configured. Your complete base plan is ready to use.' });
       if (aiPending.has(row.sprint_id)) throw new AppError(409, 'Plan adaptation is already running. Try again shortly.', 'adaptation_pending');

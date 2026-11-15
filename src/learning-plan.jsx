@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { QuizPanel, AssignmentPanel, assignmentValue } from './assessment-panels.jsx';
 
 const emptyResult = { status: 'not_started', note: '', url: '' };
 const statusLabel = status => status === 'done' ? 'Done' : status === 'in_progress' ? 'In progress' : 'Not started';
@@ -26,7 +27,7 @@ function LessonMaterials({ task, level, part }) {
       {part === 'learn' && textList(lesson.objectives).length > 0 && <section><h3>What you will learn</h3><ul>{lesson.objectives.map((objective, index) => <li key={index}>{objective}</li>)}</ul></section>}
       {part === 'learn' && (lesson.sections || []).map((section, index) => <section key={index}><h3>{section.title}</h3>{textList(section.paragraphs).map((paragraph, number) => <p key={number}>{paragraph}</p>)}{typeof section.example === 'string' && <pre className="lesson-example">{section.example}</pre>}</section>)}
       {part === 'practice' && lesson.exercise && <section><h3>Try it yourself</h3><p>{lesson.exercise.prompt}</p>{textList(lesson.exercise.checklist).length > 0 && <ol>{lesson.exercise.checklist.map((item, index) => <li key={index}>{item}</li>)}</ol>}{typeof lesson.exercise.sampleAnswer === 'string' && <details><summary>Show a sample answer</summary><pre className="lesson-example">{lesson.exercise.sampleAnswer}</pre></details>}</section>}
-      {part === 'practice' && Array.isArray(lesson.checks) && lesson.checks.length > 0 && <section><h3>Check your understanding</h3><p className="muted">Think through each question before revealing the answer.</p>{lesson.checks.map((check, index) => <div className="lesson-check" key={index}><p><strong>{index + 1}. {check.question}</strong></p><details><summary>Show answer</summary><p>{check.answer}</p>{check.explanation && <p>{check.explanation}</p>}</details></div>)}</section>}
+      {part === 'practice' && !task.quiz && Array.isArray(lesson.checks) && lesson.checks.length > 0 && <section><h3>Check your understanding</h3><p className="muted">Think through each question before revealing the answer.</p>{lesson.checks.map((check, index) => <div className="lesson-check" key={index}><p><strong>{index + 1}. {check.question}</strong></p><details><summary>Show answer</summary><p>{check.answer}</p>{check.explanation && <p>{check.explanation}</p>}</details></div>)}</section>}
       {part === 'learn' && textList(lesson.recap).length > 0 && <section><h3>Remember</h3><ul>{lesson.recap.map((item, index) => <li key={index}>{item}</li>)}</ul></section>}
     </> : <>
       {part === 'learn' && textList(task.steps).length > 0 && <section><h3>Follow these steps</h3><ol>{task.steps.map((step, index) => <li key={index}>{step}</li>)}</ol></section>}
@@ -40,13 +41,14 @@ function LessonMaterials({ task, level, part }) {
   </article>;
 }
 
-function ResultEditor({ value, saved, editable, draft, state, onChange, onSave }) {
+function ResultEditor({ value, saved, editable, draft, state, onChange, onSave, quiz, openQuiz }) {
   return <form className="panel lesson-result" onSubmit={event => { event.preventDefault(); onSave(); }}>
     <h3>Your result for this lesson</h3>
-    <p className="muted">Save what you tried and mark the lesson Done when you meet its goal. Your squad can see saved results.</p>
+    <p className="muted">{quiz ? 'Save your practice notes or a result link. Passing the quiz completes the lesson. Your squad can see saved notes.' : 'Save what you tried and mark the lesson Done when you meet its goal. Your squad can see saved results.'}</p>
+    {quiz && !quiz.result?.passed && !quiz.credited && <div className="actions result-quiz-action"><button type="button" onClick={openQuiz}>Open lesson quiz</button></div>}
     {!editable && <p className="notice">Your saved result is read-only.</p>}
     <fieldset disabled={!editable || state?.busy}>
-      <label>Status<select value={value.status} onChange={event => onChange('status', event.target.value)}><option value="not_started">Not started</option><option value="in_progress">In progress</option><option value="done">Done</option></select></label>
+      <label>Status<select value={value.status} onChange={event => onChange('status', event.target.value)}><option value="not_started">Not started</option><option value="in_progress">In progress</option><option value="done" disabled={quiz && !quiz.result?.passed && !quiz.credited}>Done{quiz && !quiz.result?.passed && !quiz.credited ? ' — pass the quiz first' : ''}</option></select></label>
       <label>Your notes or result (optional)<textarea rows={4} maxLength={2000} value={value.note} onChange={event => onChange('note', event.target.value)} placeholder="What did you learn or practise? What would you like to ask your squad?" /></label>
       <label>Result link (optional)<input type="url" maxLength={1000} value={value.url} onChange={event => onChange('url', event.target.value)} placeholder="https://…" /></label>
       {editable && <button className="primary" disabled={state?.busy}>{state?.busy ? 'Saving…' : value.status === 'done' && saved.status !== 'done' ? 'Save and complete lesson' : 'Save result'}</button>}
@@ -62,6 +64,9 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
   const [lessonPart, setLessonPart] = useState('learn');
   const [drafts, setDrafts] = useState({});
   const [saveStates, setSaveStates] = useState({});
+  const [quizDrafts, setQuizDrafts] = useState({});
+  const [assignmentDrafts, setAssignmentDrafts] = useState({});
+  const [assessmentStates, setAssessmentStates] = useState({});
   const headingRef = useRef(null);
   const focusPending = useRef(false);
   const partRef = useRef(null);
@@ -77,7 +82,8 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
   const nextTask = tasks.find(task => task.id === data.learningProgress?.nextTaskId);
   const selectedWeek = plan.weeks.find(week => week.week === selection.week);
   const selectedTask = selectedWeek?.tasks.find(task => task.id === selection.taskId);
-  const draftCount = Object.values(drafts).filter(draft => draft.dirty).length;
+  const draftCount = Object.values(drafts).filter(draft => draft.dirty).length + Object.values(assignmentDrafts).filter(draft => draft.dirty).length + Object.values(quizDrafts).filter(draft => draft.dirty).length;
+  const nextAssignment = plan.weeks.find(week => week.week === data.learningProgress?.nextAssignmentWeek);
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
@@ -100,17 +106,46 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
     if (!request) return;
     const task = tasks.find(item => item.id === request.taskId);
     const week = task?.week ?? request.week;
-    if (week) { focusPending.current = true; setLessonPart('learn'); setSelection({ week, taskId: task?.access?.unlocked ? task.id : null }); }
+    if (week) { focusPending.current = true; setLessonPart('learn'); setSelection({ week, taskId: task?.access?.unlocked ? task.id : null, assignment: !!request.assignment }); }
   }, [request]);
   useEffect(() => {
     if (focusPending.current && ['plan', 'progress'].includes(activeTab)) { focusPending.current = false; headingRef.current?.focus(); }
-  }, [selection.week, selection.taskId, activeTab]);
+  }, [selection.week, selection.taskId, selection.assignment, activeTab]);
   useEffect(() => { if (focusPart.current) { focusPart.current = false; partRef.current?.focus(); } }, [lessonPart]);
 
   function showWeek(week) { focusPending.current = true; setSelection({ week, taskId: null }); openPlan(); }
   function showTask(task, part = 'learn') { if (!task?.access?.unlocked) return; focusPending.current = true; setLessonPart(part); setSelection({ week: task.week, taskId: task.id }); openPlan(); }
   function showPart(part) { focusPart.current = true; setLessonPart(part); }
   function showAllWeeks() { focusPending.current = true; setSelection({ week: null, taskId: null }); openPlan(); }
+  function showAssignment(week) { if (!week?.assignment?.access.unlocked) return; focusPending.current = true; setSelection({ week: week.week, taskId: null, assignment: true }); openPlan(); }
+  function updateQuiz(task, questionId, value) {
+    setQuizDrafts(existing => ({ ...existing, [task.id]: { dirty: true, value: { ...(existing[task.id]?.value || task.quiz.result?.answers || {}), [questionId]: value } } }));
+  }
+  function updateAssignment(week, key, value) {
+    setAssignmentDrafts(existing => ({ ...existing, [week.week]: { dirty: true, value: { ...(existing[week.week]?.value || assignmentValue(week.assignment.result)), [key]: value } } }));
+    setAssessmentStates(existing => ({ ...existing, [`assignment:${week.week}`]: {} }));
+  }
+  async function saveAssessment(kind, target, status) {
+    const key = `${kind}:${kind === 'quiz' ? target.id : target.week}`;
+    if (assessmentStates[key]?.busy) return;
+    const submitted = kind === 'quiz' ? quizDrafts[target.id]?.value || target.quiz.result?.answers || {} : assignmentDrafts[target.week]?.value || assignmentValue(target.assignment.result);
+    setAssessmentStates(existing => ({ ...existing, [key]: { busy: true } }));
+    let persisted = false;
+    try {
+      const result = await api(`/squads/${squad.id}/${kind === 'quiz' ? `quizzes/${target.id}` : `assignments/${target.week}`}`, kind === 'quiz' ? 'POST' : 'PUT', kind === 'quiz' ? { answers: submitted } : { ...submitted, status });
+      persisted = true;
+      if (mounted.current) {
+        if (kind === 'quiz') {
+          setQuizDrafts(existing => ({ ...existing, [target.id]: { value: submitted, dirty: false } }));
+          if (result.passed) setDrafts(existing => existing[target.id] ? { ...existing, [target.id]: { ...existing[target.id], value: { ...existing[target.id].value, status: 'done' } } } : existing);
+        } else setAssignmentDrafts(existing => ({ ...existing, [target.week]: { value: submitted, dirty: false } }));
+      }
+      await onSaved();
+      if (mounted.current) setAssessmentStates(existing => ({ ...existing, [key]: { success: kind === 'quiz' ? 'Your quiz result is saved.' : status === 'submitted' ? 'Your assignment is submitted.' : 'Draft saved. Only you can see it until you submit.' } }));
+    } catch (error) {
+      if (mounted.current) setAssessmentStates(existing => ({ ...existing, [key]: persisted ? { success: 'Saved. Refresh to update your progress.' } : { error: error.message } }));
+    }
+  }
   function changeResult(taskId, key, value) {
     setDrafts(existing => ({ ...existing, [taskId]: { dirty: true, value: { ...(existing[taskId]?.value || savedByTask.get(taskId) || emptyResult), [key]: value } } }));
     setSaveStates(existing => ({ ...existing, [taskId]: { ...existing[taskId], success: '', error: '' } }));
@@ -133,23 +168,36 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
   }
   function weekDone(week) { return week.tasks.filter(task => savedByTask.get(task.id)?.status === 'done').length; }
   function weekStatus(week) {
-    if (weekDone(week) === week.tasks.length) return 'Completed';
+    if (weekDone(week) === week.tasks.length) return !week.assignment || week.assignment.credited || week.assignment.result?.status === 'submitted' ? 'Completed' : 'Assignment next';
     if (week.access?.unlocked || week.tasks.some(task => task.access?.unlocked)) return 'Available';
     return week.access?.reason === 'week_not_released' ? `Opens ${availableDate(week.access.releaseAt, zone)}` : 'Complete earlier lessons';
   }
 
+  function nextStep(task, week) {
+    const isLastInWeek = week.tasks.at(-1)?.id === task?.id;
+    if (isLastInWeek && week.assignment && !week.assignment.credited && week.assignment.result?.status !== 'submitted') return <section className="panel lesson-next"><h3>Your weekly assignment</h3><p>{week.assignment.title}</p>{week.assignment.access.unlocked ? <button className="primary" onClick={() => showAssignment(week)}>Open weekly assignment</button> : <AccessMessage access={week.assignment.access} zone={zone} />}</section>;
+    const following = task ? tasks[tasks.findIndex(item => item.id === task.id) + 1] : plan.weeks.find(item => item.week === week.week + 1)?.tasks[0];
+    return <section className="panel lesson-next"><h3>{following ? 'Your next step' : 'Course work completed'}</h3>{following ? <><p>{following.title}</p>{following.access?.unlocked ? <button className="primary" onClick={() => showTask(following)}>Continue to next lesson</button> : <AccessMessage access={following.access} zone={zone} />}</> : <p>You can review your lessons and saved work from any week.</p>}</section>;
+  }
+
   if (activeTab === 'overview') return null;
   if (activeTab === 'progress') return <div className="learning-workspace">
-    <section className="panel progress-summary"><h2 ref={headingRef} tabIndex={-1}>Your progress</h2><p className="lead"><strong>{done} of {total} lessons completed</strong></p><progress value={done} max={total} aria-label={`${done} of ${total} lessons completed`} />{suggested ? <><p>Next: <strong>{suggested.title}</strong></p><button className="primary" onClick={() => showTask(suggested)}>Continue learning</button></> : nextTask ? <><p>Next: <strong>{nextTask.title}</strong></p><AccessMessage access={nextTask.access} zone={zone} /></> : <p>Your saved work is available in the study plan.</p>}</section>
+    <section className="panel progress-summary"><h2 ref={headingRef} tabIndex={-1}>Your progress</h2><p className="lead"><strong>{done} of {total} lessons completed</strong></p>{data.learningProgress?.totalAssignments > 0 && <p>{data.learningProgress.assignmentsDone} of {data.learningProgress.totalAssignments} weekly assignments completed</p>}<progress value={done} max={total} aria-label={`${done} of ${total} lessons completed`} />{nextAssignment ? <><p>Next: <strong>{nextAssignment.assignment.title}</strong></p><button className="primary" onClick={() => showAssignment(nextAssignment)}>Open weekly assignment</button></> : suggested ? <><p>Next: <strong>{suggested.title}</strong></p><button className="primary" onClick={() => showTask(suggested)}>Continue learning</button></> : nextTask ? <><p>Next: <strong>{nextTask.title}</strong></p><AccessMessage access={nextTask.access} zone={zone} /></> : <p>Your saved work is available in the study plan.</p>}</section>
     <section className="panel"><h3>By week</h3><div className="week-progress-list">{plan.weeks.map(week => <div className="week-progress-row" key={week.week}><div><strong>Week {week.week} · {week.title}</strong><p className="muted">{weekDone(week)} of {week.tasks.length} lessons done · {weekStatus(week)}</p></div><button onClick={() => showWeek(week.week)}>View week {week.week}</button></div>)}</div></section>
-    <section className="panel"><h3>Your squad’s progress</h3><p className="muted">These are self-reported results, not a ranking or assessment.</p>{data.teamProgress?.map(person => <details className="team-result-summary" key={person.userId}><summary>{person.name}{person.userId === selfId ? ' (you)' : ''} · {person.done} of {person.total} lessons</summary>{person.results?.some(result => result.status !== 'not_started' || result.note || result.url) ? person.results.filter(result => result.status !== 'not_started' || result.note || result.url).map(result => <article className="shared-result" key={result.taskId}><h4>{tasks.find(task => task.id === result.taskId)?.title || result.taskId}</h4><p>{statusLabel(result.status)}</p>{result.locked ? <p className="muted">Unlock this lesson to view its shared notes and links.</p> : <>{result.note && <p className="preserve-lines">{result.note}</p>}{result.url && <a href={result.url} target="_blank" rel="noopener noreferrer">Open result</a>}</>}</article>) : <p>No results shared yet.</p>}</details>)}</section>
+    <section className="panel"><h3>Your squad’s progress</h3><p className="muted">Lesson quizzes are checked automatically. Practical work is self-reviewed and shared for discussion; this is not a ranking.</p>{data.teamProgress?.map(person => <details className="team-result-summary" key={person.userId}><summary>{person.name}{person.userId === selfId ? ' (you)' : ''} · {person.done} of {person.total} lessons</summary>{person.results?.some(result => result.status !== 'not_started' || result.note || result.url) ? person.results.filter(result => result.status !== 'not_started' || result.note || result.url).map(result => <article className="shared-result" key={result.taskId}><h4>{tasks.find(task => task.id === result.taskId)?.title || result.taskId}</h4><p>{statusLabel(result.status)}</p>{result.locked ? <p className="muted">Unlock this lesson to view its shared notes and links.</p> : <>{result.note && <p className="preserve-lines">{result.note}</p>}{result.url && <a href={result.url} target="_blank" rel="noopener noreferrer">Open result</a>}</>}</article>) : <p>No results shared yet.</p>}{person.assignments?.map(result => <article className="shared-result" key={`assignment-${result.week}`}><h4>Week {result.week} assignment</h4>{result.locked ? <p className="muted">Complete the lessons to view this shared assignment.</p> : <><p className="preserve-lines">{result.text}</p>{result.url && <a href={result.url} target="_blank" rel="noopener noreferrer">Open assignment link</a>}</>}</article>)}</details>)}</section>
   </div>;
 
   if (!selectedWeek) return <div className="learning-workspace">
-    <div className="learning-intro"><h2 ref={headingRef} tabIndex={-1}>Your four-week plan</h2><p>{track?.project || 'Learn one step at a time with your squad.'}</p><p className="muted">Choose a week. Each contains two lessons and a place to save your results.</p></div>
+    <div className="learning-intro"><h2 ref={headingRef} tabIndex={-1}>Your four-week plan</h2><p>{track?.project || 'Learn one step at a time with your squad.'}</p><p className="muted">{plan.weeks.some(week => week.assignment) ? 'Choose a week. Learn, practise and pass each lesson quiz, then submit your weekly assignment.' : 'Choose a week to open its lessons and saved results.'}</p></div>
     <ol className="week-grid">{plan.weeks.map(week => <li className="week-card" key={week.week}><button className="week-card-button" onClick={() => showWeek(week.week)}><span className="week-card-copy"><span className="eyebrow">Week {week.week}</span><span className="week-title">{week.title}</span>{week.summary && <span>{week.summary}</span>}<span className="muted">{week.tasks.length} lessons · {weekDone(week)} completed · {weekStatus(week)}</span></span><span className="week-open-label">View week {week.week}</span></button></li>)}</ol>
     {track?.id === 'ai' && <details className="panel"><summary>Course resources</summary><p>Mock responses support free practice. A live model requires your own provider account and may have separate usage fees.</p></details>}
     {aiAvailable && canEdit && plan.source !== 'ai' && <details className="panel"><summary>Plan options</summary><p className="muted">{working ? 'Work has started, so this plan stays fixed.' : draftCount ? 'Save your draft before changing the plan.' : 'You can optionally adapt this plan to your squad with AI before work starts.'}</p><button disabled={adapting || working || draftCount > 0} onClick={adapt}>{adapting ? 'Adapting…' : 'Customize plan with AI'}</button></details>}
+  </div>;
+
+  if (selection.assignment && selectedWeek.assignment) return <div className="learning-workspace">
+    <nav className="learning-breadcrumbs" aria-label="Study plan navigation"><button className="text-button" onClick={() => showWeek(selectedWeek.week)}>Back to week {selectedWeek.week}</button></nav>
+    <div className="learning-intro"><p className="eyebrow">Week {selectedWeek.week} · Assignment</p><h2 ref={headingRef} tabIndex={-1}>{selectedWeek.assignment.title}</h2></div>
+    {selectedWeek.assignment.access.unlocked ? <AssignmentPanel assignment={selectedWeek.assignment} value={assignmentDrafts[selectedWeek.week]?.value || assignmentValue(selectedWeek.assignment.result)} dirty={assignmentDrafts[selectedWeek.week]?.dirty} onChange={(key, value) => updateAssignment(selectedWeek, key, value)} onSave={status => saveAssessment('assignment', selectedWeek, status)} editable={canEdit && selectedWeek.assignment.access.canEdit} state={assessmentStates[`assignment:${selectedWeek.week}`]} next={nextStep(null, selectedWeek)} /> : <AccessMessage access={selectedWeek.assignment.access} zone={zone} />}
   </div>;
 
   if (!selectedTask) return <div className="learning-workspace">
@@ -167,18 +215,19 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
         <div className="lesson-choice-actions"><button className={task.access?.unlocked ? 'primary' : ''} disabled={!task.access?.unlocked} onClick={() => showTask(task)}>{saved.status === 'done' ? 'Review lesson' : 'Open lesson'}</button>{task.access?.unlocked && <button onClick={() => showTask(task, 'result')}>My result</button>}</div>
       </article>;
     })}</div>
+    {selectedWeek.assignment && <section className="panel weekly-assignment-card"><p className="eyebrow">Weekly assignment</p><h3>{selectedWeek.assignment.title}</h3><p className="muted">{selectedWeek.assignment.credited ? 'Previously completed week — credit kept.' : selectedWeek.assignment.result?.status === 'submitted' ? 'Submitted · Your squad can read your work in Progress.' : selectedWeek.assignment.result?.status === 'draft' ? 'Draft saved · Finish the checklist and submit when ready.' : 'Your own practical work, followed by a squad discussion.'}</p><AccessMessage access={selectedWeek.assignment.access} zone={zone} /><button disabled={!selectedWeek.assignment.access.unlocked} onClick={() => showAssignment(selectedWeek)}>{selectedWeek.assignment.result?.status === 'submitted' ? 'Review assignment' : 'Open weekly assignment'}</button></section>}
     {selectedWeek.preparation && <details className="panel"><summary>Prepare for this week</summary><p>{selectedWeek.preparation}</p></details>}
   </div>;
 
   const saved = savedByTask.get(selectedTask.id) || emptyResult;
-  const following = tasks[tasks.findIndex(task => task.id === selectedTask.id) + 1];
+  const parts = selectedTask.quiz ? ['learn', 'practice', 'quiz', 'result'] : ['learn', 'practice', 'result'];
   return <div className="learning-workspace">
     <nav className="learning-breadcrumbs" aria-label="Study plan navigation"><button className="text-button" onClick={showAllWeeks}>All weeks</button><span aria-hidden="true">/</span><button className="text-button" onClick={() => showWeek(selectedWeek.week)}>Back to week {selectedWeek.week}</button></nav>
     <div className="learning-intro"><p className="eyebrow">Week {selectedWeek.week} · Lesson {selectedWeek.tasks.findIndex(task => task.id === selectedTask.id) + 1}</p><h2 ref={headingRef} tabIndex={-1}>{selectedTask.title}</h2>{selectedTask.description && <p className="lead">{selectedTask.description}</p>}</div>
     {!selectedTask.access?.unlocked ? <section className="panel"><AccessMessage access={selectedTask.access} zone={zone} /><p>Your draft is kept while you stay on this squad page.</p></section> : <>
-      <div className="lesson-tabs" role="tablist" aria-label="Lesson sections">{['learn', 'practice', 'result'].map((part, index) => <button key={part} ref={node => { partTabs.current[index] = node; }} id={`lesson-tab-${part}`} role="tab" aria-selected={lessonPart === part} aria-controls={`lesson-panel-${part}`} tabIndex={lessonPart === part ? 0 : -1} onClick={() => setLessonPart(part)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % 3 : event.key === 'ArrowLeft' ? (index + 2) % 3 : event.key === 'Home' ? 0 : event.key === 'End' ? 2 : null; if (next !== null) { event.preventDefault(); setLessonPart(['learn', 'practice', 'result'][next]); partTabs.current[next]?.focus(); } }}>{part === 'result' ? 'My result' : part === 'learn' ? 'Learn' : 'Practice'}</button>)}</div>
+      <div className="lesson-tabs" role="tablist" aria-label="Lesson sections">{parts.map((part, index) => <button key={part} ref={node => { partTabs.current[index] = node; }} id={`lesson-tab-${part}`} role="tab" aria-selected={lessonPart === part} aria-controls={`lesson-panel-${part}`} tabIndex={lessonPart === part ? 0 : -1} onClick={() => setLessonPart(part)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % parts.length : event.key === 'ArrowLeft' ? (index + parts.length - 1) % parts.length : event.key === 'Home' ? 0 : event.key === 'End' ? parts.length - 1 : null; if (next !== null) { event.preventDefault(); setLessonPart(parts[next]); partTabs.current[next]?.focus(); } }}>{part === 'result' ? 'My result' : part === 'learn' ? 'Learn' : part === 'quiz' ? 'Quiz' : 'Practice'}</button>)}</div>
       <div ref={partRef} tabIndex={-1} role="tabpanel" id={`lesson-panel-${lessonPart}`} aria-labelledby={`lesson-tab-${lessonPart}`}>
-        {lessonPart === 'result' ? <><ResultEditor value={drafts[selectedTask.id]?.value || saved} saved={saved} draft={drafts[selectedTask.id]} editable={canEdit && selectedTask.access.canEdit} state={saveStates[selectedTask.id]} onChange={(key, value) => changeResult(selectedTask.id, key, value)} onSave={() => saveResult(selectedTask)} />{saved.status === 'done' && <section className="panel lesson-next"><h3>{following ? 'Your next step' : 'Last lesson completed'}</h3>{following ? <><p>{following.title}</p>{following.access?.unlocked ? <button className="primary" onClick={() => showTask(following)}>Continue to next lesson</button> : <AccessMessage access={following.access} zone={zone} />}</> : <p>You can review your results from any week.</p>}</section>}</> : <><LessonMaterials task={selectedTask} level={squad.level} part={lessonPart} /><div className="actions lesson-continue"><button className="primary" onClick={() => showPart(lessonPart === 'learn' ? 'practice' : 'result')}>{lessonPart === 'learn' ? 'Continue to practice' : 'Go to my result'}</button></div></>}
+        {lessonPart === 'quiz' && selectedTask.quiz ? <QuizPanel task={selectedTask} answers={quizDrafts[selectedTask.id]?.value || selectedTask.quiz.result?.answers || {}} onAnswer={(question, value) => updateQuiz(selectedTask, question, value)} onSubmit={() => saveAssessment('quiz', selectedTask)} editable={canEdit && selectedTask.access.canEdit} state={assessmentStates[`quiz:${selectedTask.id}`]} next={nextStep(selectedTask, selectedWeek)} /> : lessonPart === 'result' ? <><ResultEditor value={drafts[selectedTask.id]?.value || saved} saved={saved} draft={drafts[selectedTask.id]} editable={canEdit && selectedTask.access.canEdit} state={saveStates[selectedTask.id]} onChange={(key, value) => changeResult(selectedTask.id, key, value)} onSave={() => saveResult(selectedTask)} quiz={selectedTask.quiz} openQuiz={() => showPart('quiz')} />{saved.status === 'done' && nextStep(selectedTask, selectedWeek)}</> : <><LessonMaterials task={selectedTask} level={squad.level} part={lessonPart} /><div className="actions lesson-continue"><button className="primary" onClick={() => showPart(lessonPart === 'learn' ? 'practice' : selectedTask.quiz ? 'quiz' : 'result')}>{lessonPart === 'learn' ? 'Continue to practice' : selectedTask.quiz ? 'Take the quiz' : 'Go to my result'}</button></div></>}
       </div>
     </>}
   </div>;

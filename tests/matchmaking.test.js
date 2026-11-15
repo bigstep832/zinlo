@@ -394,7 +394,10 @@ test('legacy squads receive stable display numbers without losing UUID routes, s
   assert.equal(boot.history[0].id, legacyId);
   assert.equal(boot.history[0].name, 'Python Foundations #001');
   const old = await dashboard(learner, legacyId);
-  assert.deepEqual({ ...old.plan, weeks: old.plan.weeks.map(({ access, tasks, ...week }) => ({ ...week, tasks: tasks.map(({ access, ...task }) => task) })) }, legacyPlan);
+  const teachingOnly = plan => ({ ...plan, weeks: plan.weeks.map(({ access, assignment, tasks, ...week }) => ({ ...week, tasks: tasks.map(({ access, quiz, ...task }) => task) })) });
+  assert.deepEqual(teachingOnly(old.plan), teachingOnly(legacyPlan));
+  assert.equal(old.plan.weeks[0].tasks[0].quiz.credited, true);
+  assert.equal(old.plan.weeks[0].tasks[0].quiz.result, null);
   assert.equal(old.progress.find(item => item.taskId === legacyTask).note, 'Preserve my pre-migration result');
   const next = await manualSquad(learner);
   assert.equal((await dashboard(learner, next)).squad.name, 'Python Foundations #002');

@@ -1,3 +1,4 @@
+import { passQuiz, submitAssignment } from './assessment-helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -43,7 +44,7 @@ async function fixture(t) {
 const view = (person, id) => person.ok(`/api/squads/${id}`);
 const lesson = (detail, taskId) => detail.plan.weeks.flatMap(week => week.tasks).find(task => task.id === taskId);
 const save = (person, id, taskId, status = 'done', note = '') => person.request(`/api/squads/${id}/progress/${taskId}`, 'PUT', { status, note, url: '' });
-async function done(person, id, taskId) { const result = await save(person, id, taskId); assert.equal(result.status, 200, JSON.stringify(result)); }
+async function done(person, id, taskId) { await passQuiz(person, id, taskId); const result = await save(person, id, taskId); assert.equal(result.status, 200, JSON.stringify(result)); if (taskId.endsWith('-task-2')) await submitAssignment(person, id, Number(taskId.split('-')[1])); }
 function lockedMaterial(task) {
   assert.equal(task.access.unlocked, false);
   assert.deepEqual(Object.keys(task).sort(), ['access', 'id', 'title', 'week']);

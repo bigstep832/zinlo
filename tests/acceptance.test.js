@@ -1,3 +1,4 @@
+import { passQuiz } from './assessment-helpers.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -105,6 +106,7 @@ test('guests complete the real creation, matching, joining and persisted-progres
   assert.equal(ready.plan.weeks.length, 4);
   const tasks = ready.plan.weeks.flatMap(week => week.tasks);
   assert.equal(tasks.length, 8);
+  await passQuiz(a, id, tasks[0].id);
   await a.ok(`/api/squads/${id}/progress/${tasks[0].id}`, 'PUT', { status: 'done', note: 'Added my first habit without a GitHub account.', url: '' });
   const meetingId = ready.meetings[0].id;
   await b.ok(`/api/squads/${id}/meetings/${meetingId}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' });
@@ -161,6 +163,7 @@ test('outsiders cannot read or mutate private squad data, and body userId cannot
   denied(await outsider.request(`/api/squads/${id}/meetings/${meeting}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' }));
   denied(await outsider.request(`/api/squads/${id}/adapt`, 'POST', {}));
   const bId = (await b.ok('/api/bootstrap')).user.id;
+  await passQuiz(a, id, task);
   const attempt = await a.request(`/api/squads/${id}/progress/${task}`, 'PUT', { userId: bId, status: 'done', note: 'Trying another owner', url: '' });
   assert.ok(attempt.status < 500);
   assert.ok(!(await dashboard(b, id)).progress.some(item => item.status === 'done'));
@@ -294,6 +297,7 @@ test('leaving before start updates readiness, retains history and removes write 
   await joinSquad(b, id);
   await joinSquad(c, id);
   const taskId = (await dashboard(c, id)).plan.weeks[0].tasks[0].id;
+  await passQuiz(c, id, taskId);
   await c.ok(`/api/squads/${id}/progress/${taskId}`, 'PUT', { status: 'done', note: 'Before leaving', url: '' });
   await c.ok(`/api/squads/${id}/leave`, 'POST', {});
   assert.equal((await dashboard(a, id)).squad.status, 'forming');
@@ -344,6 +348,7 @@ test('unavailable AI preserves the base plan and leaves core progress usable', a
   const after = await dashboard(a, id);
   assert.equal(after.plan.source, 'base');
   assert.deepEqual(after.plan.weeks, before.plan.weeks);
+  await passQuiz(a, id, after.plan.weeks[0].tasks[0].id);
   await a.ok(`/api/squads/${id}/progress/${after.plan.weeks[0].tasks[0].id}`, 'PUT', { status: 'done', note: 'Still usable', url: '' });
 });
 
@@ -418,6 +423,7 @@ test('progress saved while AI is pending wins without losing work or rewriting i
   try {
     await Promise.race([entered, new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('AI adapter did not start')), 3000); })]);
     const taskId = before.plan.weeks[0].tasks[0].id;
+    await passQuiz(b, id, taskId);
     await b.ok(`/api/squads/${id}/progress/${taskId}`, 'PUT', { status: 'done', note: 'Saved during adaptation', url: '' });
     release();
     const result = await pending;

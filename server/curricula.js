@@ -1,5 +1,6 @@
 import { activeTracks } from './course-catalog.js';
 import { lessonMaterials } from './lesson-materials.js';
+import { courseQuizzes, courseAssignments } from './assessments.js';
 
 function week(number, title, preparation, tasks) {
   return { week: number, title, preparation, tasks: tasks.map(([title, description, criteria], i) => ({ id: `week-${number}-task-${i + 1}`, week: number, title, description, criteria })) };
@@ -74,16 +75,18 @@ export function withLessonMaterials(plan, trackId) {
   const course = tracks.find(track => track.id === trackId);
   if (!course || !lessonMaterials[trackId]) return plan;
   const currentTasks = new Map(course.weeks.flatMap(week => week.tasks).map(task => [task.id, task]));
-  let enriched = false;
-  const weeks = plan.weeks.map(week => ({ ...week, tasks: week.tasks.map(task => {
+  const weeks = plan.weeks.map(week => {
+    const tasks = week.tasks.map(task => {
     const original = currentTasks.get(task.id), lesson = lessonMaterials[trackId][task.id];
     // IDs existed in earlier curricula too. Exact task text prevents attaching a
     // new tutorial to an older task whose meaning changed. Saved plans stay intact.
-    if (task.lesson || !lesson || original?.title !== task.title || original?.description !== task.description) return task;
-    enriched = true;
-    return { ...task, lesson: structuredClone(lesson) };
-  }) }));
-  return enriched ? { ...plan, weeks } : plan;
+    const matching = lesson && (original?.title === task.title && original?.description === task.description || task.lesson && JSON.stringify(task.lesson) === JSON.stringify(lesson));
+    if (!matching) return task;
+    return { ...task, lesson: task.lesson || structuredClone(lesson), quiz: task.quiz || structuredClone(courseQuizzes[trackId][task.id]) };
+    });
+    return { ...week, tasks, ...(tasks.every(task => task.quiz) ? { assignment: week.assignment || structuredClone(courseAssignments[trackId][week.week - 1]) } : {}) };
+  });
+  return { ...plan, weeks };
 }
 export function basePlan(trackId, level) {
   const track = trackById(trackId);
