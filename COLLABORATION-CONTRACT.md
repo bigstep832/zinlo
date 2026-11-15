@@ -37,7 +37,7 @@ All current teammates must be present and ready to start. Once started, temporar
 
 The client polls every second and negotiates one peer connection with each teammate. It buffers early ICE candidates, closes departed peers, stops media on exit, supports mic/camera toggles, and offers an explicit reconnect control after a failed connection. If autoplay is blocked, the video tile shows a play button. Browser permission is requested only through an explicit media button; listening without devices is allowed.
 
-Both audio/video sections are negotiated even for listen-only joins. A microphone or camera enabled mid-call uses `replaceTrack` on existing senders; enabling one device preserves the other device and its mute state. Camera-off state is shared with teammates on the next heartbeat. Video absolutely fills its tile using `object-fit: cover` without stretching.
+Both audio/video sections are negotiated even for listen-only joins. A microphone or camera enabled mid-call uses `replaceTrack` on existing senders; enabling one device preserves the other device and its mute state. Camera-off state is shared with teammates on the next heartbeat. Video uses `object-fit: contain` so the full camera frame stays visible. Desktop tiles use 4:3 without a viewport-height cap; three participants appear in one row on wide screens. Different camera ratios retain padding rather than cropping.
 
 Cloudflare credentials are generated server-side with a 7,200-second TTL. The permanent token remains in a private environment file. A failed relay request returns a generic 503 rather than exposing a provider response or silently claiming relay availability. Optional coturn credentials use the standard expiring username/HMAC mechanism.
 

@@ -79,3 +79,7 @@ Pricing and proposed future team/refund policy are documented in README. No real
 - Full server suite: 89 passing tests. Production build successful. Existing branding is now Zinlo; technical persistence keys are preserved.
 
 The built application also uploaded both fixtures inside the existing assessment squad, sent them using Enter, and displayed the saved photo/file beside the normal sidebar navigation. No browser console errors were reported. Evidence: `evidence/zinlo-chat.png`. Published page title/header/footer and favicon were verified after restart; existing four squad plans and one Meet link were preserved. GitHub repository renamed to `bigstep832/zinlo`, retaining private visibility.
+
+## Full camera frame correction
+
+Removed the viewport-height cap that flattened wide tiles; changed video fitting to contain and desktop cards to 4:3. Three members occupy one row on screens at least 1000 CSS pixels wide. Actual WebRTC generated 4:3, 16:9 and 9:16 streams displayed every frame-edge marker at desktop and 390px mobile widths, with no document overflow. Evidence: `evidence/zinlo-full-frame.png`, `evidence/zinlo-full-frame-mobile.png`. The targeted UX catalog had no relevant frame-cropping rule; the fix follows the observed geometry and browser verification.

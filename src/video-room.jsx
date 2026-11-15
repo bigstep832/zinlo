@@ -95,7 +95,7 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
     <header className="video-room-heading"><div><h1 id="video-room-title">Your squad room</h1><p>{inCall ? 'A little time to learn together.' : 'Settle in. Let your team know you’re ready.'}</p></div>{state && <span className="room-people"><Users size={16} aria-hidden="true" />{state.participants.length} people</span>}</header>
     {error && <p className="notice error" role="alert">{error}</p>}
     <div className="video-stage">
-      <div className="video-grid">
+      <div className="video-grid" data-participants={state?.participants.length || 1}>
         <VideoTile stream={stream} name={selfName} avatarUrl={state?.participants.find(person => person.peerId === session?.peerId)?.avatarUrl} self cameraOff={!camera} status={hasVideo && !camera ? 'Camera off' : ready ? 'Ready' : 'Your preview'} />
         {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} cameraOff={person.media?.video === false} status={connections[person.peerId] === 'connected' ? (person.media?.video === false ? 'Camera off' : 'Connected') : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
       </div>
