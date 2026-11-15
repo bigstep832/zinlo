@@ -115,6 +115,18 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       run('UPDATE squads SET name=?,display_number=? WHERE id=?', name, number, squad.id);
     }
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS squads_display_number ON squads(display_number)');
+    // JavaScript has been removed from the product. Retain its stored work for
+    // recovery, but release memberships and let the same guests choose a course.
+    run("UPDATE sprints SET status='closed' WHERE squad_id IN (SELECT id FROM squads WHERE track_id='javascript') AND status IN ('forming','ready','active')");
+    run("UPDATE memberships SET active=0,left_at=COALESCE(left_at,?) WHERE active=1 AND squad_id IN (SELECT id FROM squads WHERE track_id='javascript')", stamp());
+    for (const person of all('SELECT id,profile FROM users')) {
+      const saved = JSON.parse(person.profile);
+      if (saved.trackId !== 'javascript') continue;
+      delete saved.trackId;
+      saved.level = 'beginner';
+      run('UPDATE users SET profile=? WHERE id=?', JSON.stringify(saved), person.id);
+      run('DELETE FROM matchmaking_queue WHERE user_id=?', person.id);
+    }
     retireArchivedSearches();
   });
   function rate(key, limit, duration) {
@@ -154,6 +166,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return user;
   }
   function requireActiveTrack(trackId) {
+    if (trackId === 'javascript') throw new AppError(410, 'This course has been removed. Choose a current course to continue.', 'course_removed');
     if (!isActiveTrack(trackId)) throw new AppError(409, 'This course is archived. Choose an available course to find a new squad.', 'track_archived');
   }
   function current(userId) {
@@ -177,8 +190,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   }
   function bootstrap(user) {
     const currentSquadId = user ? current(user.id) : null;
-    const history = user ? all('SELECT squad_id FROM memberships WHERE user_id = ? ORDER BY joined_at DESC', user.id).filter(m => m.squad_id !== currentSquadId).map(m => summary(squadRow(m.squad_id))) : [];
-    return { user, tracks: tracks.map(coursePreview), archivedTracks: archivedTracks.map(coursePreview), currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
+    const history = user ? all("SELECT m.squad_id FROM memberships m JOIN squads q ON q.id=m.squad_id WHERE m.user_id=? AND q.track_id<>'javascript' ORDER BY m.joined_at DESC", user.id).filter(m => m.squad_id !== currentSquadId).map(m => summary(squadRow(m.squad_id))) : [];
+    return { user, tracks: tracks.map(coursePreview), archivedTracks: archivedTracks.filter(track => track.id !== 'javascript').map(coursePreview), currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
   }
   function retireArchivedSearches() {
     for (const person of all("SELECT m.user_id,u.profile FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting'")) {
@@ -259,6 +272,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const row = squadRow(squadId);
     const membership = q('SELECT * FROM memberships WHERE squad_id = ? AND user_id = ?', squadId, user.id);
     if (!membership) throw new AppError(403, 'Only this squad’s members can access its workspace.', 'forbidden');
+    if (row.track_id === 'javascript') throw new AppError(410, 'This course has been removed. Choose a current course to continue.', 'course_removed');
     if (edit && (!membership.active || !unfinished.includes(row.status))) throw new AppError(403, 'This sprint is read-only for you.', 'read_only');
     return { row, membership };
   }

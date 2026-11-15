@@ -185,9 +185,9 @@ test('legacy saved future work is preserved and teammates cannot use shared resu
 
 test('completed legacy sprint remains readable without changing its stored plan or allowing writes', async t => {
   const f = await fixture(t), { people: [a], id } = await f.team();
-  const legacy = basePlan('javascript', 'beginner'); delete legacy.level;
+  const legacy = basePlan('ai', 'basics'); delete legacy.level;
   const encoded = JSON.stringify(legacy);
-  f.db.prepare("UPDATE squads SET track_id='javascript' WHERE id=?").run(id);
+  f.db.prepare("UPDATE squads SET track_id='ai',level='basics' WHERE id=?").run(id);
   f.db.prepare('UPDATE sprints SET plan=? WHERE squad_id=?').run(encoded, id);
   const initial = await view(a, id);
   lockedMaterial(lesson(initial, 'week-4-task-2'));

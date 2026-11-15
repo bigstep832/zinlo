@@ -122,7 +122,7 @@ function Onboarding({ boot, onSaved, createSession }) {
 }
 
 function ProfileForm({ boot, editing = false, onSaved }) {
-  const [form, setForm] = useState(() => ({ name: boot.user?.name || '', trackId: (boot.currentSquadId ? boot.user?.trackId : boot.selectedTrack || boot.user?.trackId) || boot.tracks[0]?.id || '', level: boot.user?.level || 'beginner', timezone: boot.user?.trackId ? boot.user.timezone : detectedZone, availability: boot.user?.availability?.length ? boot.user.availability : [{ day: 2, start: '19:00', end: '22:00' }, { day: 4, start: '19:00', end: '22:00' }] }));
+  const [form, setForm] = useState(() => ({ name: boot.user?.name || '', trackId: (boot.currentSquadId ? boot.user?.trackId : boot.selectedTrack || boot.user?.trackId) || boot.tracks[0]?.id || '', level: boot.user?.level || 'beginner', timezone: boot.user?.timezone || detectedZone, availability: boot.user?.availability?.length ? boot.user.availability : [{ day: 2, start: '19:00', end: '22:00' }, { day: 4, start: '19:00', end: '22:00' }] }));
   const [step, setStep] = useState(0); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [conflict, setConflict] = useState(false);
   const track = findTrack(boot, form.trackId); const current = !!boot.currentSquadId;
   const archived = !boot.tracks.some(item => item.id === form.trackId);
@@ -182,7 +182,6 @@ function ProfileForm({ boot, editing = false, onSaved }) {
         <span><strong>{level.title}</strong><small>{level.description}</small></span>
       </label>)}
       <p className="muted">This is your own assessment, not an entrance exam. We match you with learners at the same starting level.</p>
-      {track?.starterUrl && <p>A prepared starter is included with your existing course.</p>}
     </fieldset>}
     {visible(2) && <fieldset disabled={busy}><legend>{editing ? 'Availability' : '3. When can you meet?'}</legend><Availability form={form} update={update} /><p className="muted">Choose all the time you could attend, not a commitment to every hour. Availability repeats for four weeks. We check all eight dates before matching.</p></fieldset>}
     {visible(3) && !editing && <fieldset><legend>4. Review your preferences</legend><dl className="review-list"><dt>Name</dt><dd>{form.name}</dd><dt>Course</dt><dd>{track?.title}</dd><dt>Outcome</dt><dd>{track?.project}</dd><dt>Level</dt><dd>{levelTitle(track, form.level)}</dd><dt>Time zone</dt><dd>{form.timezone}</dd><dt>Available times</dt><dd>{form.availability.map((a, i) => <div key={i}>{DAYS[a.day - 1]} · {a.start}–{a.end}</div>)}</dd></dl><p>Four weeks · 3–4 learners · two 50-minute meetings each week · about two hours of independent practice.</p><p>We will automatically form a squad of 3–4 learners with the same track and level, and choose two weekly windows within your availability. All eight meetings must fit everyone. Your place is reserved and the full schedule appears when a match is found.</p><Notice>No payment is collected in this MVP. Only one unfinished sprint at a time.</Notice><p className="muted">Your guest access stays in this browser. Clearing cookies or switching devices loses access; recovery is not yet available.</p></fieldset>}
@@ -279,6 +278,7 @@ function Dashboard({ id, boot, refreshBoot, go, waitingMeetingId = null }) {
   const [planRequest, setPlanRequest] = useState(null);
   const bootRef = useRef(boot); bootRef.current = boot;
   const refreshRef = useRef(refreshBoot); refreshRef.current = refreshBoot;
+  const goRef = useRef(go); goRef.current = go;
   const dataRef = useRef(null);
   const scopeRef = useRef(id); scopeRef.current = id;
   const mountedRef = useRef(true);
@@ -301,7 +301,15 @@ function Dashboard({ id, boot, refreshBoot, go, waitingMeetingId = null }) {
       acceptDashboard(result);
       if ((!result.isMember || ['closed', 'completed'].includes(result.squad.status)) && bootRef.current.currentSquadId === id) await refreshRef.current();
       return result;
-    } catch (err) { if (!controller.signal.aborted) throw err; return dataRef.current; }
+    } catch (err) {
+      if (!controller.signal.aborted && err.code === 'course_removed') {
+        const updated = await refreshRef.current();
+        if (mountedRef.current && scopeRef.current === id) goRef.current(updated.currentSquadId ? `/squads/${updated.currentSquadId}` : '/start', true);
+        return null;
+      }
+      if (!controller.signal.aborted) throw err;
+      return dataRef.current;
+    }
     finally { if (readRef.current === controller) readRef.current = null; }
   }, [id, acceptDashboard]);
   const change = useCallback(async (path, method, body) => {
