@@ -2,6 +2,8 @@
 
 The primary user flow now uses automatic matchmaking. See [MATCHMAKING-CONTRACT.md](MATCHMAKING-CONTRACT.md) for queue endpoints, the additional `matchmaking` bootstrap field and generated course-plus-number squad names. The manual matching and squad-creation endpoints below remain available for compatibility; they are no longer the primary UI flow. Client-provided squad names are ignored in favor of the generated name.
 
+Meeting readiness and automatic Google Meet creation extend this API: see [MEET-CONTRACT.md](MEET-CONTRACT.md). Upcoming conference URLs are withheld until every current member is ready; dashboard meetings include readiness state and the dashboard includes Google connection availability.
+
 All JSON endpoints are same-origin under `/api`. Errors: `{error: string, code?: string, conflicts?: array}`. Real SQLite persistence with server-derived identity in HttpOnly cookie. Plain English UI, white panels and borders. No fake users in normal data. Node 24 native `node:sqlite`, React + Vite + Luxon. Backend listens 3001; Vite proxies `/api` to it. Production backend serves dist on 3001. All dates ISO UTC strings, availability local IANA zone. Level `beginner` or `basics`. Track IDs `python`, `javascript`, `ai`.
 
 ## Data
@@ -27,4 +29,4 @@ Dashboard: `{squad: summary, members:[{id,name,isSelf,active}], meetings:[{id,st
 
 Backend module exports `createApp({dbPath,now,aiAdapter}={})` -> `{server,db,close}`. `server` is node http.Server (not listening); test uses server.listen(0). `now` injected returns Date. `aiAdapter` optional async function receives base plan + track/level and returns weeks; validate output. `server/index.js` starts default app. Database at env DB_PATH or data/learning-squads.sqlite. Never seed automatically. FRONTEND fetch helper attaches credentials and JSON. Export backend pure scheduling functions if convenient for tests; HTTP integration tests primary.
 
-No payment processing, compulsory registration, automatic Meet creation, chat, code execution or actual attendance tracking. Price informational $29; no charges in MVP. Explain guest cookie recovery limit and AI course API costs; mock-friendly JS starter available from public/starter.html. Use native accessible dialog or inline confirmations, clear loading/errors/success.
+No payment processing, compulsory registration, chat, code execution or actual attendance tracking. Automatic Meet creation requires the optional Google OAuth setup. Price informational $29; no charges in MVP. Explain guest cookie recovery limit and AI course API costs; mock-friendly JS starter available from public/starter.html. Use native accessible dialog or inline confirmations, clear loading/errors/success.

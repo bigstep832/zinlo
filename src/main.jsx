@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef, useId } from 'react';
+import React, { useState, useEffect, useRef, useId, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
+import { MeetingReadiness, MeetingJoinLink, useMeetingAccess } from './meeting-access.jsx';
 import './styles.css';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -205,9 +206,64 @@ function Matches({ boot, go, refresh }) {
 
 function Dashboard({ id, boot, refreshBoot, go }) {
   const [data, setData] = useState(null); const [tab, setTab] = useState('overview'); const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false); const [leaving, setLeaving] = useState(false); const [meeting, setMeeting] = useState(null);
+  const [pollError, setPollError] = useState('');
+  const [receivedAt, setReceivedAt] = useState(0);
   const bootRef = useRef(boot); bootRef.current = boot;
-  async function load() { const result = await api(`/squads/${id}`); if ((!result.isMember || ['closed', 'completed'].includes(result.squad.status)) && bootRef.current.currentSquadId === id) await refreshBoot(); setData(result); return result; }
-  useEffect(() => { load().catch(e => setError(e.message)); const timer = setInterval(() => { if (document.visibilityState === 'visible') load().catch(() => {}); }, 30000); return () => clearInterval(timer); }, [id]);
+  const refreshRef = useRef(refreshBoot); refreshRef.current = refreshBoot;
+  const dataRef = useRef(null);
+  const scopeRef = useRef(id); scopeRef.current = id;
+  const mountedRef = useRef(true);
+  const readRef = useRef(null);
+  const readVersion = useRef(0);
+  const mutations = useRef(new Set());
+  const acceptDashboard = useCallback(result => {
+    if (!mountedRef.current || scopeRef.current !== id) return;
+    dataRef.current = result; setData(result); setReceivedAt(Date.now()); setPollError('');
+  }, [id]);
+  const load = useCallback(async (background = false) => {
+    if (mutations.current.size || (background && readRef.current)) return dataRef.current;
+    readRef.current?.abort();
+    const controller = new AbortController();
+    const version = ++readVersion.current;
+    readRef.current = controller;
+    try {
+      const result = await api(`/squads/${id}`, 'GET', undefined, controller.signal);
+      if (controller.signal.aborted || !mountedRef.current || scopeRef.current !== id || version !== readVersion.current) return dataRef.current;
+      acceptDashboard(result);
+      if ((!result.isMember || ['closed', 'completed'].includes(result.squad.status)) && bootRef.current.currentSquadId === id) await refreshRef.current();
+      return result;
+    } catch (err) { if (!controller.signal.aborted) throw err; return dataRef.current; }
+    finally { if (readRef.current === controller) readRef.current = null; }
+  }, [id, acceptDashboard]);
+  const change = useCallback(async (path, method, body) => {
+    readVersion.current++; readRef.current?.abort();
+    const controller = new AbortController(); mutations.current.add(controller);
+    try {
+      const result = await api(path, method, body, controller.signal);
+      if (controller.signal.aborted || !mountedRef.current || scopeRef.current !== id) return result;
+      if (result.squad && Array.isArray(result.meetings)) acceptDashboard(result);
+      else if (method === 'DELETE') {
+        const updated = await api(`/squads/${id}`, 'GET', undefined, controller.signal);
+        if (!controller.signal.aborted) acceptDashboard(updated);
+      }
+      return result;
+    } finally { mutations.current.delete(controller); }
+  }, [id, acceptDashboard]);
+  useEffect(() => {
+    mountedRef.current = true; dataRef.current = null; setData(null); setError('');
+    load().catch(e => { if (mountedRef.current && scopeRef.current === id) setError(e.message); });
+    const poll = () => { if (document.visibilityState === 'visible' && (!dataRef.current || dataRef.current.isMember && dataRef.current.canEdit)) load(true).catch(e => { if (mountedRef.current && scopeRef.current === id) setPollError(`Live updates paused. ${e.message}`); }); };
+    const timer = setInterval(poll, 4000);
+    document.addEventListener('visibilitychange', poll);
+    const callback = new URLSearchParams(location.search).get('googleMeet');
+    if (callback) {
+      if (callback === 'connected') setNotice('Your Google account is connected. Your squad can now create shared Meet links.');
+      else setError('Google could not be connected. Please try again.');
+      const url = new URL(location.href); url.searchParams.delete('googleMeet'); history.replaceState(null, '', url.pathname + url.search + url.hash);
+    }
+    return () => { mountedRef.current = false; readVersion.current++; readRef.current?.abort(); for (const controller of mutations.current) controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', poll); };
+  }, [id, load]);
+  const meetingAccess = useMeetingAccess({ squadId: id, data, receivedAt, change, suspended: busy || leaving });
   async function leave() { setBusy(true); setError(''); try { await api(`/squads/${id}/leave`, 'POST', {}); await refreshBoot(); go('/matches'); } catch (e) { setError(e.message); setLeaving(false); } finally { setBusy(false); } }
   async function adapt() { setBusy(true); setError(''); setNotice(''); try { const result = await api(`/squads/${id}/adapt`, 'POST', {}); setNotice(result.message || (result.source === 'ai' ? 'Your adapted plan has been saved.' : 'The base plan is still available.')); await load(); } catch (e) { setError(e.message); } finally { setBusy(false); } }
   if (!data) return <><Notice error>{error}</Notice>{error ? <div className="actions"><button onClick={() => { setError(''); load().catch(e => setError(e.message)); }}>Retry</button><button onClick={() => go('/')}>Go home</button></div> : <Loading>Loading your squad…</Loading>}</>;
@@ -216,10 +272,10 @@ function Dashboard({ id, boot, refreshBoot, go }) {
   const tasks = plan.weeks.flatMap(w => w.tasks); const done = progress.filter(p => p.status === 'done').length;
   const nextMeeting = meetings.find(m => new Date(m.endsAt).getTime() > Date.now()); const nextTask = tasks.find(t => !progress.some(p => p.taskId === t.id && p.status === 'done'));
   const working = progress.some(p => p.status !== 'not_started' || p.note || p.url) || data.teamProgress?.some(p => p.results?.some(r => r.status !== 'not_started' || r.note || r.url));
-  return <><div className="page-heading"><div><p className="eyebrow">{track?.title} · {LEVELS[squad.level]}</p><h1>{squad.name || 'Your learning squad'}</h1><p>{dateText(squad.startDate, zone)} – {dateText(squad.endDate, zone)} · {zone}</p></div><Badge status={squad.status} /></div><Notice error>{error}</Notice><Notice>{notice}</Notice>{squad.status === 'forming' && <Notice>Recruitment is open: {squad.memberCount} of 4 learners. Your squad needs at least 3 learners by the first meeting. You can start preparing now.</Notice>}{squad.status === 'ready' && <Notice>Your squad has enough learners to start. Check the dates and prepare for your first meeting.</Notice>}{squad.status === 'closed' && <Notice>This squad closed without starting. Your saved work is still here. <button className="text-button" onClick={() => go('/matches')}>Find another squad</button></Notice>}{squad.status === 'completed' && <Notice>The four-week sprint has ended. Task completion reflects your own reports; it does not certify a skill. Your history and results remain available.</Notice>}{!canEdit && !['completed', 'closed'].includes(squad.status) && <Notice>You are viewing a previous squad. Your saved work remains available in read-only mode.</Notice>}
+  return <><div className="page-heading"><div><p className="eyebrow">{track?.title} · {LEVELS[squad.level]}</p><h1>{squad.name || 'Your learning squad'}</h1><p>{dateText(squad.startDate, zone)} – {dateText(squad.endDate, zone)} · {zone}</p></div><Badge status={squad.status} /></div><Notice error>{error}</Notice><Notice error>{pollError}</Notice><Notice>{notice}</Notice>{squad.status === 'forming' && <Notice>Recruitment is open: {squad.memberCount} of 4 learners. Your squad needs at least 3 learners by the first meeting. You can start preparing now.</Notice>}{squad.status === 'ready' && <Notice>Your squad has enough learners to start. Check the dates and prepare for your first meeting.</Notice>}{squad.status === 'closed' && <Notice>This squad closed without starting. Your saved work is still here. <button className="text-button" onClick={() => go('/matches')}>Find another squad</button></Notice>}{squad.status === 'completed' && <Notice>The four-week sprint has ended. Task completion reflects your own reports; it does not certify a skill. Your history and results remain available.</Notice>}{!canEdit && !['completed', 'closed'].includes(squad.status) && <Notice>You are viewing a previous squad. Your saved work remains available in read-only mode.</Notice>}
     <div className="tabs" role="tablist" aria-label="Squad sections">{['overview', 'plan', 'progress'].map((t, index) => <button key={t} id={`tab-${t}`} role="tab" tabIndex={tab === t ? 0 : -1} aria-selected={tab === t} aria-controls={`panel-${t}`} onKeyDown={e => { const options = ['overview', 'plan', 'progress']; const next = e.key === 'ArrowRight' ? (index + 1) % 3 : e.key === 'ArrowLeft' ? (index + 2) % 3 : e.key === 'Home' ? 0 : e.key === 'End' ? 2 : null; if (next !== null) { e.preventDefault(); setTab(options[next]); document.getElementById(`tab-${options[next]}`)?.focus(); } }} onClick={() => { setTab(t); setNotice(''); }}>{t[0].toUpperCase() + t.slice(1)}</button>)}<button className="refresh" onClick={async () => { setError(''); try { await load(); await refreshBoot(); setNotice('Squad updated.'); } catch (e) { setError(e.message); } }}>Refresh</button></div>
     <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
-    {tab === 'overview' && <><div className="grid overview-grid"><section className="panel"><p className="eyebrow">Your next step</p><h2>{nextMeeting ? 'Your next meeting' : 'No upcoming meetings'}</h2>{nextMeeting ? <><p className="lead">{dateText(nextMeeting.startsAt, zone, true)}</p><h3>{nextMeeting.topic}</h3><p>{timeText(nextMeeting.startsAt, zone)}–{timeText(nextMeeting.endsAt, zone)} · 50 minutes</p><MeetLink meeting={nextMeeting} editable={canEdit} onEdit={() => setMeeting(nextMeeting)} /></> : <p>Your saved plan and results are available in the other tabs.</p>}{nextTask && <div className="next-task"><h3>Prepare at your own pace</h3><p>{nextTask.title}</p><p className="muted">{nextTask.description}</p><button onClick={() => setTab('plan')}>Open study plan</button></div>}<p className="muted">Meeting format: 5 minutes on blockers, 35 minutes of practice, 10 minutes to share results and next steps.</p></section><aside className="panel"><h2>Your squad</h2><p>{squad.memberCount} of 4 active learners</p><ul className="member-list">{members.map(m => <li key={m.id}><span>{m.name}{m.isSelf || m.id === boot.user?.id ? ' (you)' : ''}</span>{!m.active && <span className="muted">Left squad</span>}</li>)}</ul><h3>Shared goal</h3><p>{track?.project}</p><p className="muted">You each build your own project. A missed meeting does not block anyone else’s work.</p><p><strong>{done} of {tasks.length} tasks done</strong></p><button onClick={() => setTab('progress')}>View my progress</button></aside></div><section className="panel"><h2>All eight meetings</h2><p className="muted">Times in {zone}. Reserve the full hour shown. The actual meeting lasts 50 minutes.</p><div className="meeting-list">{meetings.map((m, i) => <article key={m.id}><div><p className="eyebrow">Meeting {i + 1} · Week {m.week}</p><h3>{m.topic}</h3><p>{dateText(m.startsAt, zone)} · {timeText(m.startsAt, zone)}–{timeText(m.windowEndsAt || m.endsAt, zone)}</p></div><MeetLink meeting={m} editable={canEdit} onEdit={() => setMeeting(m)} /></article>)}</div></section></>}
+    {tab === 'overview' && <><div className="grid overview-grid"><section className="panel"><p className="eyebrow">Your next step</p><h2>{nextMeeting ? 'Your next meeting' : 'No upcoming meetings'}</h2>{nextMeeting ? <><p className="lead">{dateText(nextMeeting.startsAt, zone, true)}</p><h3>{nextMeeting.topic}</h3><p>{timeText(nextMeeting.startsAt, zone)}–{timeText(nextMeeting.endsAt, zone)} · 50 minutes</p><MeetingReadiness access={meetingAccess} Modal={Modal} onManualLink={() => setMeeting(nextMeeting)} /></> : <p>Your saved plan and results are available in the other tabs.</p>}{nextTask && <div className="next-task"><h3>Prepare at your own pace</h3><p>{nextTask.title}</p><p className="muted">{nextTask.description}</p><button onClick={() => setTab('plan')}>Open study plan</button></div>}<p className="muted">Meeting format: 5 minutes on blockers, 35 minutes of practice, 10 minutes to share results and next steps.</p></section><aside className="panel"><h2>Your squad</h2><p>{squad.memberCount} of 4 active learners</p><ul className="member-list">{members.map(m => <li key={m.id}><span>{m.name}{m.isSelf || m.id === boot.user?.id ? ' (you)' : ''}</span>{!m.active && <span className="muted">Left squad</span>}</li>)}</ul><h3>Shared goal</h3><p>{track?.project}</p><p className="muted">You each build your own project. A missed meeting does not block anyone else’s work.</p><p><strong>{done} of {tasks.length} tasks done</strong></p><button onClick={() => setTab('progress')}>View my progress</button></aside></div><section className="panel"><h2>All eight meetings</h2><p className="muted">Times in {zone}. Reserve the full hour shown. The actual meeting lasts 50 minutes.</p><div className="meeting-list">{meetings.map((m, i) => <article key={m.id}><div><p className="eyebrow">Meeting {i + 1} · Week {m.week}</p><h3>{m.topic}</h3><p>{dateText(m.startsAt, zone)} · {timeText(m.startsAt, zone)}–{timeText(m.windowEndsAt || m.endsAt, zone)}</p></div><MeetLink meeting={m} editable={canEdit} onEdit={() => setMeeting(m)} /></article>)}</div></section></>}
     {tab === 'plan' && <><section className="panel"><div className="row"><div><h2>Your four-week study plan</h2><p><strong>{plan.source === 'ai' ? 'AI-adapted plan' : 'Base plan'}</strong> · Saved for this sprint</p></div>{canEdit && plan.source !== 'ai' && <button disabled={busy || working} onClick={adapt}>{busy ? 'Adapting plan…' : 'Adapt plan with AI'}</button>}</div><p className="muted">{working ? 'Work has already started. This plan stays fixed to protect your progress.' : 'An optional AI adaptation adjusts the plan to this squad’s track and level. The base plan remains available if adaptation fails.'}</p>{!boot.aiAvailable && <p className="muted">AI adaptation is not connected on this installation. The full base curriculum works without it.</p>}{plan.message && <Notice>{plan.message}</Notice>}{track?.id === 'javascript' && <p><a href={track.starterUrl || '/starter.html'} target="_blank" rel="noreferrer">Open the HTML/CSS starter</a> <a href={track.starterUrl || '/starter.html'} download="starter.html">Download HTML</a>{' · '}<a href="/starter.js" download="starter.js">Download JavaScript</a></p>}{track?.id === 'ai' && <p>Use mock responses for free practice. Connecting a live model requires a provider account and may incur separate API usage fees.</p>}</section><div className="stack">{plan.weeks.map(w => <section className="panel" key={w.week}><p className="eyebrow">Week {w.week}</p><h2>{w.title}</h2><p><strong>Preparation:</strong> {w.preparation}</p><div className="grid two">{w.tasks.map(t => <article className="task-description" key={t.id}><h3>{t.title}</h3><p>{t.description}</p><p className="muted"><strong>Done when:</strong> {displayCriteria(t.criteria)}</p><button onClick={() => { setTab('progress'); setTimeout(() => document.getElementById(`task-${t.id}`)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }), 0); }}>Open my result</button></article>)}</div></section>)}</div></>}
     {tab === 'progress' && <><section className="panel"><h2>Your work</h2><p className="lead">{done} of {tasks.length} tasks done</p><progress value={done} max={tasks.length} aria-label={`${done} of ${tasks.length} tasks done`} /><p className="muted">Done is a self-report, not an automatic assessment. A short explanation is enough; a repository or demo link is optional. Your squad can see the results you save.</p></section><div className="stack">{tasks.map(task => <ProgressEditor key={task.id} squadId={id} task={task} saved={progress.find(p => p.taskId === task.id)} editable={canEdit} onSaved={load} />)}</div><section className="panel"><h2>Shared results</h2><p className="muted">Support each other by discussing completed work. These counts do not measure skill or rank participants.</p><div className="stack">{data.teamProgress?.map(person => <details key={person.userId}><summary>{person.name}{person.userId === boot.user?.id ? ' (you)' : ''} · {person.done} of {person.total} tasks done</summary>{person.results?.filter(r => r.note || r.url || r.status !== 'not_started').length ? person.results.filter(r => r.note || r.url || r.status !== 'not_started').map(r => <article className="shared-result" key={r.taskId}><h3>{tasks.find(t => t.id === r.taskId)?.title || r.taskId}</h3><p>{r.status === 'done' ? 'Done' : r.status === 'in_progress' ? 'In progress' : 'Not started'}</p>{r.note && <p className="preserve-lines">{r.note}</p>}{r.url && <a href={r.url} target="_blank" rel="noopener noreferrer">Open result</a>}</article>) : <p>No results shared yet.</p>}</details>)}</div></section></>}
     </div>
@@ -230,7 +286,8 @@ function Dashboard({ id, boot, refreshBoot, go }) {
 }
 
 function MeetLink({ meeting, editable, onEdit }) {
-  return <div className="meet-controls">{meeting.meetUrl ? <><a className="button" href={meeting.meetUrl} target="_blank" rel="noopener noreferrer">Join Google Meet</a>{meeting.organizerName && <small>Organized by {meeting.organizerName}</small>}</> : <p className="muted">No Meet link yet.</p>}{editable && <button className="text-button" onClick={onEdit}>{meeting.meetUrl ? 'Edit Meet link' : 'Add Meet link'}</button>}</div>;
+  const upcoming = new Date(meeting.endsAt).getTime() > Date.now();
+  return <div className="meet-controls"><MeetingJoinLink meeting={meeting} />{!meeting.meetUrl && <p className="muted">{upcoming ? 'Meet opens when everyone is ready.' : 'No meeting link was saved.'}</p>}{editable && !meeting.readiness?.launchId && <button className="text-button" onClick={onEdit}>Use an existing Meet link</button>}</div>;
 }
 
 function MeetingEditor({ squadId, meeting, onSaved }) {

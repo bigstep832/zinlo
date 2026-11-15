@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { tracks, trackById, basePlan } from './curricula.js';
 import { AppError, fail, validateProfile, generateSchedule, scheduleConflicts, cohortStart } from './scheduling.js';
 import { findAutomaticGroup, hasSeparateMeetingDays } from './matchmaking.js';
+import { createGoogleMeetService } from './google-meet.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -62,7 +63,7 @@ function configuredAIAdapter() {
   };
 }
 
-export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoot, 'data', 'learning-squads.sqlite'), now = () => new Date(), aiAdapter = undefined } = {}) {
+export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoot, 'data', 'learning-squads.sqlite'), now = () => new Date(), aiAdapter = undefined, meetAdapter, googleMeetConfig, googleOAuthClientFactory } = {}) {
   if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -75,6 +76,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     CREATE TABLE IF NOT EXISTS progress (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), task_id TEXT NOT NULL, status TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', PRIMARY KEY(sprint_id,user_id,task_id));
     CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS matchmaking_queue (user_id TEXT PRIMARY KEY REFERENCES users(id), state TEXT NOT NULL, queued_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS meeting_readiness (meeting_id TEXT NOT NULL REFERENCES meetings(id), user_id TEXT NOT NULL REFERENCES users(id), ready_at TEXT NOT NULL, PRIMARY KEY(meeting_id,user_id));
+    CREATE TABLE IF NOT EXISTS meeting_launches (meeting_id TEXT PRIMARY KEY REFERENCES meetings(id), state TEXT NOT NULL, launch_id TEXT NOT NULL, started_at TEXT NOT NULL, space_name TEXT, error TEXT);
     CREATE INDEX IF NOT EXISTS rate_events_key_time ON rate_events(key,created_at);
     CREATE INDEX IF NOT EXISTS memberships_user ON memberships(user_id,active);
     CREATE INDEX IF NOT EXISTS meetings_sprint ON meetings(sprint_id);
@@ -84,6 +87,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   const run = (sql, ...args) => db.prepare(sql).run(...args);
   const stamp = () => now().toISOString();
   const adapter = aiAdapter === undefined ? configuredAIAdapter() : aiAdapter;
+  const googleMeet = createGoogleMeetService({ db, now, config: googleMeetConfig, oauthClientFactory: googleOAuthClientFactory });
+  const meetConfigured = typeof meetAdapter === 'function' || googleMeet.configured;
   const aiPending = new Set();
   let closed = false;
   let inTransaction = false;
@@ -253,7 +258,36 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const { row, membership } = authorizeMember(squadId, user);
     const plan = JSON.parse(row.plan);
     const roster = members(squadId, true, user.id);
-    return { squad: summary(row), members: roster, meetings: meetingRows(row.sprint_id, true), plan, progress: results(row.sprint_id, user.id, plan), teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: 8, results: p }; }), isMember: !!membership.active, canEdit: !!membership.active && unfinished.includes(row.status) };
+    const connection = { configured: meetConfigured, connected: !!meetAdapter || googleMeet.connected(user.id), organizerAvailable: !!meetingOrganizer(squadId), ...(!meetConfigured ? { message: 'Automatic Google Meet is not configured on this installation yet.' } : {}) };
+    const meetings = meetingRows(row.sprint_id, true).map(meeting => {
+      const readiness = meetingReadiness(row, meeting.id, user.id, !!membership.active);
+      const past = meeting.endsAt <= stamp();
+      return { ...meeting, meetUrl: past || (membership.active && readiness.allReady && readiness.status === 'ready') ? meeting.meetUrl : '', readiness };
+    });
+    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan, progress: results(row.sprint_id, user.id, plan), teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: 8, results: p }; }), isMember: !!membership.active, canEdit: !!membership.active && unfinished.includes(row.status) };
+  }
+  function meetingOrganizer(squadId) {
+    return members(squadId).find(member => !!meetAdapter || googleMeet.connected(member.id))?.id || null;
+  }
+  function meetingReadiness(row, meetingId, selfId, activeMember = true) {
+    const meeting = q('SELECT * FROM meetings WHERE id=? AND sprint_id=?', meetingId, row.sprint_id);
+    if (!meeting) throw new AppError(404, 'Meeting not found.', 'not_found');
+    const nearest = q('SELECT id FROM meetings WHERE sprint_id=? AND ends_at > ? ORDER BY starts_at LIMIT 1', row.sprint_id, stamp());
+    const eligible = activeMember && ['ready', 'active'].includes(row.status) && nearest?.id === meetingId;
+    const saved = new Map(all('SELECT user_id,ready_at FROM meeting_readiness WHERE meeting_id=?', meetingId).map(person => [person.user_id, person.ready_at]));
+    const roster = all('SELECT m.user_id,m.joined_at,u.profile FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.squad_id=? AND m.active=1 ORDER BY m.joined_at,m.user_id', row.id).map(person => ({ id: person.user_id, name: JSON.parse(person.profile).name, ready: saved.has(person.user_id) && saved.get(person.user_id) >= person.joined_at }));
+    const readyCount = roster.filter(person => person.ready).length;
+    const allReady = eligible && roster.length > 0 && readyCount === roster.length;
+    const launch = q('SELECT * FROM meeting_launches WHERE meeting_id=?', meetingId);
+    const creating = launch?.state === 'creating' && Date.parse(launch.started_at) + 60000 > now().getTime();
+    let status = 'waiting';
+    let error;
+    if (allReady && meeting.meet_url && launch?.state !== 'error' && !creating) status = 'ready';
+    else if (creating) status = 'creating';
+    else if (launch?.state === 'error' || launch?.state === 'creating') { status = 'error'; error = launch.error || 'Conference creation was interrupted. Please retry.'; }
+    else if (!meeting.meet_url && !meetConfigured) status = 'setup_required';
+    else if (!meeting.meet_url && !meetingOrganizer(row.id)) status = 'connection_required';
+    return { eligible, selfReady: activeMember && !!roster.find(person => person.id === selfId)?.ready, readyCount, totalCount: roster.length, members: activeMember ? roster : [], allReady, status, ...(error ? { error } : {}), ...(meeting.meet_url ? { launchId: launch?.launch_id || `${meetingId}:${hash(meeting.meet_url).slice(0,16)}` } : {}) };
   }
   function canJoin(user, row) {
     if (!['forming', 'ready'].includes(row.status) || row.starts_at <= stamp()) throw new AppError(409, 'Recruitment has closed for this squad.', 'recruitment_closed');
@@ -289,6 +323,11 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     let user = userFromRequest(req);
     if (method === 'GET' && pathname === '/api/health') return json(res, 200, { ok: true });
     if (method === 'GET' && pathname === '/api/bootstrap') return json(res, 200, bootstrap(user));
+    if (method === 'GET' && pathname === '/api/google-meet/callback') {
+      const result = await googleMeet.callback(new URL(req.url, 'http://localhost'), user?.id, (squadId, userId) => { refreshLifecycle(); authorizeMember(squadId, profile(userId), true); });
+      res.writeHead(303, { location: result.squadId ? `/squads/${encodeURIComponent(result.squadId)}?googleMeet=${result.connected ? 'connected' : 'error'}` : '/?googleMeet=error', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+      return res.end();
+    }
     if (method === 'POST' && pathname === '/api/session') {
       if (!user) {
         rate(`session:${req.socket.remoteAddress}`, 60, 3600000);
@@ -302,6 +341,78 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, bootstrap(user));
     }
     requireUser(user, false);
+    if (method === 'POST' && pathname === '/api/google-meet/connect') {
+      if (typeof data.squadId !== 'string') fail('Choose your squad before connecting Google Meet.');
+      authorizeMember(data.squadId, user, true);
+      if (!googleMeet.configured) throw new AppError(503, 'Automatic Google Meet needs to be configured by the site owner first.', 'meet_setup_required');
+      rate(`google-connect:${user.id}`, 8, 3600000);
+      try { return json(res, 200, await googleMeet.begin(user.id, data.squadId)); }
+      catch { throw new AppError(503, 'Google Meet could not be connected. Please try again.', 'google_connect_failed'); }
+    }
+    if (method === 'DELETE' && pathname === '/api/google-meet/connection') {
+      await googleMeet.disconnect(user.id);
+      return json(res, 200, { ok: true });
+    }
+    const readinessRoute = pathname.match(/^\/api\/squads\/([^/]+)\/meetings\/([^/]+)\/(readiness|launch)$/);
+    if (readinessRoute) {
+      const [, squadId, meetingId, action] = readinessRoute;
+      if (method === 'PUT' && action === 'readiness') {
+        if (typeof data.ready !== 'boolean') fail('Readiness must be true or false.');
+        transaction(() => {
+          const { row } = authorizeMember(squadId, user, true);
+          if (!meetingReadiness(row, meetingId, user.id).eligible) throw new AppError(409, 'Only your next meeting can accept readiness.', 'meeting_not_eligible');
+          if (data.ready) run('INSERT INTO meeting_readiness VALUES (?,?,?) ON CONFLICT(meeting_id,user_id) DO UPDATE SET ready_at=excluded.ready_at', meetingId, user.id, stamp());
+          else run('DELETE FROM meeting_readiness WHERE meeting_id=? AND user_id=?', meetingId, user.id);
+        });
+        return json(res, 200, dashboard(squadId, user));
+      }
+      if (method === 'POST' && action === 'launch') {
+        const claim = transaction(() => {
+          const { row } = authorizeMember(squadId, user, true);
+          const readiness = meetingReadiness(row, meetingId, user.id);
+          if (!readiness.eligible || !readiness.allReady) throw new AppError(409, 'Every current teammate must confirm readiness for this meeting first.', 'teammates_not_ready');
+          const meeting = q('SELECT * FROM meetings WHERE id=?', meetingId);
+          if (readiness.status === 'ready' || readiness.status === 'creating') return null;
+          const organizerId = meetingOrganizer(squadId);
+          if (!meetConfigured || !organizerId) return null;
+          if (meeting.meet_url && members(squadId).some(member => member.id === meeting.organizer_id) && (meetAdapter || googleMeet.connected(meeting.organizer_id))) {
+            run("UPDATE meeting_launches SET state='ready',error=NULL WHERE meeting_id=?", meetingId);
+            return null;
+          }
+          rate(`meet-create:${meetingId}`, 5, 600000);
+          const launchId = id();
+          // An old space whose organizer lost authorization before completion is
+          // never released. An explicit retry may choose a new connected organizer.
+          if (meeting.meet_url) run("UPDATE meetings SET meet_url='',organizer_id=NULL WHERE id=?", meetingId);
+          run("INSERT INTO meeting_launches(meeting_id,state,launch_id,started_at,error) VALUES (?,'creating',?,?,NULL) ON CONFLICT(meeting_id) DO UPDATE SET state='creating',launch_id=excluded.launch_id,started_at=excluded.started_at,error=NULL", meetingId, launchId, stamp());
+          return { organizerId, launchId };
+        });
+        if (!claim) return json(res, 200, dashboard(squadId, user));
+        try {
+          let timer;
+          const operation = meetAdapter ? () => meetAdapter({ meetingId, squadId, organizerId: claim.organizerId }) : () => googleMeet.createMeeting(claim.organizerId);
+          const result = await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Creation timeout')), 25000); timer.unref?.(); })]).finally(() => clearTimeout(timer));
+          const url = meetUrl(result?.url);
+          if (!url) throw new Error('Missing meeting URL');
+          transaction(() => {
+            refreshLifecycle();
+            const currentLaunch = q('SELECT launch_id FROM meeting_launches WHERE meeting_id=?', meetingId);
+            if (currentLaunch?.launch_id !== claim.launchId) return;
+            // Keep the successfully created space even when readiness changed during
+            // the network call. Dashboard gating rechecks the current roster before
+            // exposing it, and a later retry reuses this URL instead of creating another.
+            const organizerStillAuthorized = members(squadId).some(member => member.id === claim.organizerId) && (!!meetAdapter || googleMeet.connected(claim.organizerId));
+            run('UPDATE meetings SET meet_url=?,organizer_id=? WHERE id=?', url, claim.organizerId, meetingId);
+            run('UPDATE meeting_launches SET state=?,space_name=?,error=? WHERE meeting_id=? AND launch_id=?', organizerStillAuthorized ? 'ready' : 'error', typeof result.spaceName === 'string' ? result.spaceName.slice(0,500) : null, organizerStillAuthorized ? null : 'The organizer left or disconnected during conference creation. Connect a current organizer and retry.', meetingId, claim.launchId);
+          });
+        } catch {
+          run("UPDATE meeting_launches SET state='error',error=? WHERE meeting_id=? AND launch_id=?", 'Google Meet could not create this conference. Check the organizer connection and try again.', meetingId, claim.launchId);
+        }
+        refreshLifecycle();
+        return json(res, 200, dashboard(squadId, profile(user.id)));
+      }
+      throw new AppError(405, 'Method not allowed.', 'method_not_allowed');
+    }
     if (pathname === '/api/matchmaking' && method === 'GET') return json(res, 200, searchState(user.id));
     if (pathname === '/api/matchmaking' && method === 'DELETE') {
       const state = transaction(() => {
@@ -393,14 +504,16 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, { squadId });
     }
     if (method === 'POST' && action === 'leave') {
-      transaction(() => { authorizeMember(squadId, user); run('UPDATE memberships SET active=0,left_at=? WHERE squad_id=? AND user_id=? AND active=1', stamp(), squadId, user.id); lastMatchFingerprint = null; refreshLifecycle(); });
+      transaction(() => { const { row } = authorizeMember(squadId, user); run('UPDATE memberships SET active=0,left_at=? WHERE squad_id=? AND user_id=? AND active=1', stamp(), squadId, user.id); run('DELETE FROM meeting_readiness WHERE user_id=? AND meeting_id IN (SELECT id FROM meetings WHERE sprint_id=?)', user.id, row.sprint_id); lastMatchFingerprint = null; refreshLifecycle(); });
       return json(res, 200, { ok: true });
     }
     if (method === 'PUT' && action === 'meetings' && resourceId) {
       const { row } = authorizeMember(squadId, user, true);
       if (!q('SELECT id FROM meetings WHERE id=? AND sprint_id=?', resourceId, row.sprint_id)) throw new AppError(404, 'Meeting not found.', 'not_found');
       const url = meetUrl(data.url);
+      if (q("SELECT meeting_id FROM meeting_launches WHERE meeting_id=? AND state='creating' AND started_at > ?", resourceId, new Date(now().getTime() - 60000).toISOString())) throw new AppError(409, 'A conference is being created. Please wait.', 'meet_creation_pending');
       run('UPDATE meetings SET meet_url=?,organizer_id=? WHERE id=?', url, url ? user.id : null, resourceId);
+      run('INSERT INTO meeting_launches(meeting_id,state,launch_id,started_at) VALUES (?,?,?,?) ON CONFLICT(meeting_id) DO UPDATE SET state=excluded.state,launch_id=excluded.launch_id,started_at=excluded.started_at,error=NULL', resourceId, url ? 'ready' : 'waiting', id(), stamp());
       return json(res, 200, { ok: true });
     }
     if (method === 'PUT' && action === 'progress' && resourceId) {

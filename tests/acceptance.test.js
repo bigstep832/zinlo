@@ -108,6 +108,8 @@ test('guests complete the real creation, matching, joining and persisted-progres
   await a.ok(`/api/squads/${id}/progress/${tasks[0].id}`, 'PUT', { status: 'done', note: 'Added my first habit without a GitHub account.', url: '' });
   const meetingId = ready.meetings[0].id;
   await b.ok(`/api/squads/${id}/meetings/${meetingId}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' });
+  assert.equal((await dashboard(a, id)).meetings.find(item => item.id === meetingId).meetUrl, '');
+  for (const person of [a, b, c]) await person.ok(`/api/squads/${id}/meetings/${meetingId}/readiness`, 'PUT', { ready: true });
   await f.restart();
   assert.equal((await a.ok('/api/bootstrap')).currentSquadId, id);
   const persisted = await dashboard(a, id);

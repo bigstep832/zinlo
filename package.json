@@ -1,7 +1,25 @@
 {
-  "name": "learning-squads", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": {"dev": "node scripts/dev.mjs", "server": "node --env-file-if-exists=.env server/index.js", "build": "vite build", "start": "node --env-file-if-exists=.env server/index.js", "test": "node --test tests/*.test.js"},
-  "engines": {"node": ">=24"},
-  "dependencies": {"react": "^19.2.0", "react-dom": "^19.2.0", "luxon": "^3.7.2"},
-  "devDependencies": {"vite": "^7.2.2"}
+  "name": "learning-squads",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "server": "node --env-file-if-exists=.env server/index.js",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.9.1",
+    "luxon": "^3.7.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "vite": "^7.2.2"
+  }
 }

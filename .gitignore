@@ -6,3 +6,7 @@ data/
 !.env.example
 *.log
 coverage/
+credentials.json
+client_secret*.json
+google-oauth*.json
+token.json
