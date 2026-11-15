@@ -138,7 +138,7 @@ test('double joins are idempotent and concurrent final-seat joins cannot exceed 
   assert.equal(new Set(full.members.filter(member => member.active).map(member => member.id)).size, 4);
 });
 
-test('one person cannot join two unfinished squads even with simultaneous requests', async t => {
+test('one person cannot join two unfinished squads of the same course even with simultaneous requests', async t => {
   const f = await fixture(t);
   const [a, b, c] = await Promise.all(['A', 'B', 'C'].map(name => f.guest(name)));
   const ids = await Promise.all([createSquad(a), createSquad(b)]);
@@ -287,7 +287,9 @@ test('changing availability reports conflicts and requires confirmation without 
   await a.ok('/api/profile', 'PUT', { ...changed, confirmConflict: true });
   assert.deepEqual((await dashboard(a, id)).meetings.map(item => item.startsAt), before.meetings.map(item => item.startsAt));
   const changedTrack = await a.request('/api/profile', 'PUT', { ...changed, trackId: 'spanish', confirmConflict: true });
-  assert.ok([400, 409, 422].includes(changedTrack.status));
+  assert.equal(changedTrack.status, 200);
+  assert.equal((await dashboard(a, id)).squad.trackId, 'python');
+  assert.equal((await a.ok('/api/bootstrap')).activeCourses.length, 1);
 });
 
 test('leaving before start updates readiness, retains history and removes write access', async t => {
@@ -319,7 +321,7 @@ test('time closes undersubscribed squads and releases users to create another co
   assert.notEqual(await createSquad(a), id);
 });
 
-test('ready squads become active, remain active after a departure, then complete without inventing progress', async t => {
+test('ready squads become active, explicitly continue as a pair after a departure, then complete without inventing progress', async t => {
   const f = await fixture(t);
   const [a, b, c, outsider] = await Promise.all(['A', 'B', 'C', 'D'].map(name => f.guest(name)));
   const id = await createSquad(a);
@@ -331,6 +333,8 @@ test('ready squads become active, remain active after a departure, then complete
   conflict(await outsider.request(`/api/squads/${id}/join`, 'POST', {}));
   await c.ok(`/api/squads/${id}/leave`, 'POST', {});
   assert.equal((await dashboard(a, id)).squad.status, 'active');
+  const recovery = (await dashboard(a, id)).recovery;
+  for (const person of [a,b]) await person.ok(`/api/squads/${id}/recovery`, 'POST', { caseId: recovery.id, choice: 'duo' });
   f.setTime(new Date(new Date(before.squad.endDate).getTime() + 86_400_000));
   const completed = await dashboard(a, id);
   assert.equal(completed.squad.status, 'completed');

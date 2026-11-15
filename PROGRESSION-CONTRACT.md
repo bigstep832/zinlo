@@ -71,3 +71,7 @@ SQLite tables `quiz_results`, `weekly_submissions` and `learning_credits` persis
 Active courses include original teaching material for all eight lessons. The existing stable task identifiers, objectives and completion criteria remain the link between lessons, meeting topics and personal results. Historical saved plans without new fields continue to render.
 
 Each optional `task.lesson` includes an estimated study duration, objectives, short teaching sections, a guided exercise with a revealable sample answer, questions with explanations, recap and supporting references. This material is attached only to the corresponding course/task; it must never be substituted across courses or unrelated historical Python tasks that happen to reuse a task ID.
+
+## Recovery transfers
+
+Independent recovery clones the saved curriculum, original creation/start/end dates and exact weekly release instants, then copies personal progress, quizzes, assignment drafts/submissions and existing migration credits. Sequential, assessment and calendar gates still apply. A replacement real squad has its own schedule; only tasks and assignments with identical hydrated content are copied, so a different adapted curriculum does not inherit unrelated credit. The old saved work stays in history. Different active subjects have independent sprint-scoped work.

@@ -14,6 +14,8 @@ import { coursePreview, planAccess } from './progression.js';
 import { gradeQuiz } from './assessments.js';
 import { createVideoRooms } from './video-rooms.js';
 import { createChatAttachments } from './chat-attachments.js';
+import { createDemoSquads } from './demo-squads.js';
+import { createSquadRecovery } from './squad-recovery.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -90,6 +92,13 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     CREATE INDEX IF NOT EXISTS chat_squad_id ON chat_messages(squad_id,id);
     CREATE TABLE IF NOT EXISTS chat_attachments (id TEXT PRIMARY KEY, squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), message_id INTEGER REFERENCES chat_messages(id), name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS chat_attachment_message ON chat_attachments(message_id);
+    CREATE TABLE IF NOT EXISTS demo_runs (owner_id TEXT PRIMARY KEY REFERENCES users(id), squad_id TEXT UNIQUE NOT NULL REFERENCES squads(id));
+    CREATE TABLE IF NOT EXISTS course_orders (squad_id TEXT NOT NULL REFERENCES squads(id),user_id TEXT NOT NULL REFERENCES users(id),paid_cents INTEGER NOT NULL,currency TEXT NOT NULL,mode TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(squad_id,user_id));
+    CREATE TABLE IF NOT EXISTS recovery_cases (id TEXT PRIMARY KEY,squad_id TEXT NOT NULL REFERENCES squads(id),opened_at TEXT NOT NULL,deadline_at TEXT NOT NULL,remaining_meetings INTEGER NOT NULL,total_meetings INTEGER NOT NULL,reason TEXT NOT NULL,state TEXT NOT NULL,updated_at TEXT NOT NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS one_open_recovery ON recovery_cases(squad_id) WHERE state='open';
+    CREATE TABLE IF NOT EXISTS recovery_choices (case_id TEXT NOT NULL REFERENCES recovery_cases(id),user_id TEXT NOT NULL REFERENCES users(id),choice TEXT NOT NULL,target_squad_id TEXT REFERENCES squads(id),created_at TEXT NOT NULL,PRIMARY KEY(case_id,user_id));
+    CREATE TABLE IF NOT EXISTS course_refunds (id TEXT PRIMARY KEY,case_id TEXT NOT NULL REFERENCES recovery_cases(id),user_id TEXT NOT NULL REFERENCES users(id),amount_cents INTEGER NOT NULL,paid_cents INTEGER NOT NULL,remaining_meetings INTEGER NOT NULL,total_meetings INTEGER NOT NULL,currency TEXT NOT NULL,mode TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(case_id,user_id));
+    CREATE TABLE IF NOT EXISTS course_release_dates (sprint_id TEXT NOT NULL REFERENCES sprints(id),week INTEGER NOT NULL,release_at TEXT NOT NULL,PRIMARY KEY(sprint_id,week));
     CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS matchmaking_queue (user_id TEXT PRIMARY KEY REFERENCES users(id), state TEXT NOT NULL, queued_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS meeting_readiness (meeting_id TEXT NOT NULL REFERENCES meetings(id), user_id TEXT NOT NULL REFERENCES users(id), ready_at TEXT NOT NULL, PRIMARY KEY(meeting_id,user_id));
@@ -106,6 +115,8 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   const googleMeet = createGoogleMeetService({ db, now, config: googleMeetConfig, oauthClientFactory: googleOAuthClientFactory });
   const meetConfigured = typeof meetAdapter === 'function' || googleMeet.configured;
   const videoRoom = createVideoRooms({ authorizeMember, meetingReadiness, members, now, rate });
+  const demoSquads = createDemoSquads({ q, run, now, rate, transaction, createSquadRecord, squadRow, summary });
+  const recovery = createSquadRecovery({ q, all, run, now, transaction, squadRow, members, current, createSquadRecord, demoSquads });
   const chatAttachments = createChatAttachments({ q, all, run, now, rate, authorizeMember, currentUser: req => { refreshLifecycle(); return requireUser(userFromRequest(req), false); } });
   const aiPending = new Set();
   let closed = false;
@@ -126,6 +137,12 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (!columns.has('display_number')) db.exec('ALTER TABLE squads ADD COLUMN display_number INTEGER');
     if (!columns.has('learning_mode')) db.exec("ALTER TABLE squads ADD COLUMN learning_mode TEXT NOT NULL DEFAULT 'squad'");
     if (!columns.has('auto_matched')) db.exec('ALTER TABLE squads ADD COLUMN auto_matched INTEGER NOT NULL DEFAULT 0');
+    if (!columns.has('is_demo')) db.exec('ALTER TABLE squads ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0');
+    if (!columns.has('min_members')) db.exec('ALTER TABLE squads ADD COLUMN min_members INTEGER NOT NULL DEFAULT 3');
+    if (!columns.has('established')) {
+      db.exec('ALTER TABLE squads ADD COLUMN established INTEGER NOT NULL DEFAULT 0');
+      run("UPDATE squads SET established=1 WHERE id IN (SELECT squad_id FROM sprints WHERE status IN ('ready','active','completed'))");
+    }
     let next = q('SELECT COALESCE(MAX(display_number),0) AS n FROM squads').n;
     for (const squad of all('SELECT id,track_id,display_number FROM squads ORDER BY created_at,id')) {
       const number = squad.display_number || ++next;
@@ -167,19 +184,21 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   }
   function refreshLifecycle() {
     return transaction(() => {
+      recovery.sync();
       const time = stamp();
       for (const sprint of all("SELECT * FROM sprints WHERE status IN ('forming','ready','active')")) {
         const count = q('SELECT COUNT(*) AS n FROM memberships WHERE squad_id = ? AND active = 1', sprint.squad_id).n;
         let status = sprint.status;
-        if (q('SELECT learning_mode FROM squads WHERE id=?', sprint.squad_id).learning_mode === 'solo') {
+        const config = q('SELECT learning_mode,min_members FROM squads WHERE id=?', sprint.squad_id);
+        if (config.learning_mode === 'solo') {
           if (!count) status = 'closed';
           else if (time >= sprint.ends_at) status = 'completed';
           else status = 'active';
           if (status !== sprint.status) run('UPDATE sprints SET status=? WHERE id=?', status, sprint.id);
           continue;
         }
-        if (status !== 'active') status = count >= 3 ? 'ready' : 'forming';
-        if (status !== 'active' && (count === 0 || time >= sprint.starts_at)) status = count >= 3 ? 'active' : 'closed';
+        if (status !== 'active') status = count >= config.min_members ? 'ready' : 'forming';
+        if (status !== 'active' && (count === 0 || time >= sprint.starts_at)) status = count >= config.min_members ? 'active' : 'closed';
         if (status === 'active' && time >= sprint.ends_at) status = 'completed';
         if (status !== sprint.status) run('UPDATE sprints SET status = ? WHERE id = ?', status, sprint.id);
       }
@@ -207,8 +226,15 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (trackId === 'javascript') throw new AppError(410, 'This course has been removed. Choose a current course to continue.', 'course_removed');
     if (!isActiveTrack(trackId)) throw new AppError(409, 'This course is archived. Choose an available course to find a new squad.', 'track_archived');
   }
-  function current(userId) {
-    return q("SELECT s.squad_id AS id FROM sprints s JOIN memberships m ON m.squad_id = s.squad_id WHERE m.user_id = ? AND m.active = 1 AND s.status IN ('forming','ready','active') LIMIT 1", userId)?.id || null;
+  function current(userId, trackId = profile(userId)?.trackId) {
+    return q("SELECT s.squad_id AS id FROM sprints s JOIN squads q ON q.id=s.squad_id JOIN memberships m ON m.squad_id = s.squad_id WHERE q.is_demo=0 AND q.track_id=? AND m.user_id = ? AND m.active = 1 AND s.status IN ('forming','ready','active') LIMIT 1", trackId || '', userId)?.id || null;
+  }
+  function occupiedMeetings(userId) {
+    return all("SELECT m.starts_at AS startsAt,m.window_ends_at AS windowEndsAt FROM meetings m JOIN sprints s ON s.id=m.sprint_id JOIN squads q ON q.id=s.squad_id JOIN memberships member ON member.squad_id=q.id WHERE member.user_id=? AND member.active=1 AND q.is_demo=0 AND s.status IN ('forming','ready','active') ORDER BY m.starts_at", userId);
+  }
+  function occupiedConflicts(userId, meetings) {
+    const busy = occupiedMeetings(userId);
+    return meetings.filter(meeting => busy.some(other => Date.parse(meeting.startsAt) < Date.parse(other.windowEndsAt) && Date.parse(meeting.windowEndsAt) > Date.parse(other.startsAt)));
   }
   function squadRow(squadId) {
     const row = q('SELECT q.*,s.id AS sprint_id,s.status,s.starts_at,s.ends_at,s.timezone,s.plan FROM squads q JOIN sprints s ON s.squad_id = q.id WHERE q.id = ?', squadId);
@@ -219,17 +245,18 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return all('SELECT m.*,u.profile AS organizer_profile FROM meetings m LEFT JOIN users u ON u.id = m.organizer_id WHERE m.sprint_id = ? ORDER BY m.starts_at', sprintId).map(m => ({ id: m.id, startsAt: m.starts_at, endsAt: m.ends_at, windowEndsAt: m.window_ends_at, topic: m.topic, week: m.week, ...(privateFields ? { meetUrl: m.meet_url, organizerName: m.organizer_profile ? JSON.parse(m.organizer_profile).name : null } : {}) }));
   }
   function members(squadId, includeFormer = false, selfId = null) {
-    return all(`SELECT m.*,u.profile FROM memberships m JOIN users u ON m.user_id=u.id WHERE m.squad_id = ? ${includeFormer ? '' : 'AND m.active = 1'} ORDER BY m.joined_at,m.user_id`, squadId).map(m => ({ id: m.user_id, name: JSON.parse(m.profile).name, avatarUrl: avatarUrl(m.user_id), ...(includeFormer ? { active: !!m.active, isSelf: m.user_id === selfId } : {}) }));
+    return all(`SELECT m.*,u.profile FROM memberships m JOIN users u ON m.user_id=u.id WHERE m.squad_id = ? ${includeFormer ? '' : 'AND m.active = 1'} ORDER BY m.joined_at,m.user_id`, squadId).map(m => ({ id: m.user_id, name: JSON.parse(m.profile).name || 'Guest', isDemo: !!JSON.parse(m.profile).isDemo, avatarUrl: avatarUrl(m.user_id), ...(includeFormer ? { active: !!m.active, isSelf: m.user_id === selfId } : {}) }));
   }
   function summary(row) {
     const roster = members(row.id);
     const name = `${trackById(row.track_id).title} #${String(row.display_number).padStart(3, '0')}`;
-    return { id: row.id, learningMode: row.learning_mode || 'squad', name, number: row.display_number, trackId: row.track_id, level: row.level, status: row.status, memberCount: roster.length, capacity: 4, members: roster, meetings: meetingRows(row.sprint_id), startDate: row.starts_at, endDate: row.ends_at };
+    return { id: row.id, isDemo: !!row.is_demo, minimumMembers: row.min_members, learningMode: row.learning_mode || 'squad', name, number: row.display_number, trackId: row.track_id, level: row.level, status: row.status, memberCount: roster.length, capacity: 4, members: roster, meetings: meetingRows(row.sprint_id), startDate: row.starts_at, endDate: row.ends_at };
   }
   function bootstrap(user) {
     const currentSquadId = user ? current(user.id) : null;
-    const history = user ? all("SELECT m.squad_id FROM memberships m JOIN squads q ON q.id=m.squad_id WHERE m.user_id=? AND q.track_id<>'javascript' ORDER BY m.joined_at DESC", user.id).filter(m => m.squad_id !== currentSquadId).map(m => summary(squadRow(m.squad_id))) : [];
-    return { user, tracks: tracks.map(coursePreview), archivedTracks: archivedTracks.filter(track => track.id !== 'javascript').map(coursePreview), currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
+    const activeCourses = user ? all("SELECT q.id FROM squads q JOIN sprints s ON s.squad_id=q.id JOIN memberships m ON m.squad_id=q.id WHERE m.user_id=? AND m.active=1 AND q.is_demo=0 AND s.status IN ('forming','ready','active') ORDER BY m.joined_at DESC,q.display_number DESC", user.id).map(row => summary(squadRow(row.id))) : [];
+    const history = user ? all("SELECT m.squad_id FROM memberships m JOIN squads q ON q.id=m.squad_id WHERE m.user_id=? AND q.is_demo=0 AND q.track_id<>'javascript' ORDER BY m.joined_at DESC", user.id).filter(m => !activeCourses.some(course => course.id === m.squad_id)).map(m => summary(squadRow(m.squad_id))) : [];
+    return { user, tracks: tracks.map(coursePreview), archivedTracks: archivedTracks.filter(track => track.id !== 'javascript').map(coursePreview), currentSquadId, activeCourses, demoHistory: user ? all("SELECT m.squad_id FROM memberships m JOIN squads q ON q.id=m.squad_id WHERE m.user_id=? AND q.is_demo=1 ORDER BY m.joined_at DESC,q.display_number DESC", user.id).filter(m => m.squad_id !== demoSquads.current(user.id)).map(m => summary(squadRow(m.squad_id))) : [], demoSquadId: user ? demoSquads.current(user.id) : null, pendingRecovery: user ? recovery.pending(user.id) : null, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
   }
   function retireArchivedSearches() {
     for (const person of all("SELECT m.user_id,u.profile FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting'")) {
@@ -249,18 +276,21 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (search.state === 'expired') return { status: 'expired', message: 'Your search expired while this page was inactive. Start again when you are ready.' };
     return { status: 'waiting', waitingSince: search.queued_at, expiresAt: search.expires_at, message: 'Looking for at least three learners with the same course, level, and eight compatible meeting windows. Keep this page open.' };
   }
-  function createSquadRecord(anchor, schedule, participantIds, automatic = false) {
+  function createSquadRecord(anchor, schedule, participantIds, automatic = false, { demo = false } = {}) {
     requireActiveTrack(anchor.trackId);
     if (participantIds.length < 1 || participantIds.length > 4 || new Set(participantIds).size !== participantIds.length) throw new Error('Invalid team membership');
-    for (const userId of participantIds) if (current(userId)) throw new AppError(409, 'A learner has already joined another unfinished sprint.', 'active_squad');
+    for (const userId of participantIds) if (!demo && current(userId, anchor.trackId)) throw new AppError(409, 'A learner already has an active enrollment in this course.', 'active_squad');
+    if (!demo && participantIds.some(userId => occupiedConflicts(userId, schedule.meetings).length)) throw new AppError(409, 'These meeting times overlap another course you have joined. Choose different times.', 'course_time_conflict');
     const squadId = id(), sprintId = id(), plan = basePlan(anchor.trackId, anchor.level);
     const number = q('SELECT COALESCE(MAX(display_number),0)+1 AS n FROM squads').n;
     const name = `${trackById(anchor.trackId).title} #${String(number).padStart(3, '0')}`;
-    run('INSERT INTO squads(id,name,track_id,level,created_at,display_number,auto_matched) VALUES (?,?,?,?,?,?,?)', squadId, name, anchor.trackId, anchor.level, stamp(), number, automatic ? 1 : 0);
+    run('INSERT INTO squads(id,name,track_id,level,created_at,display_number,auto_matched,is_demo) VALUES (?,?,?,?,?,?,?,?)', squadId, name, anchor.trackId, anchor.level, stamp(), number, automatic ? 1 : 0, Number(demo));
     run('INSERT INTO sprints(id,squad_id,status,starts_at,ends_at,timezone,plan) VALUES (?,?,?,?,?,?,?)', sprintId, squadId, participantIds.length >= 3 ? 'ready' : 'forming', schedule.startDate, schedule.endDate, anchor.timezone, JSON.stringify(plan));
     for (const userId of participantIds) {
       run('INSERT INTO memberships(squad_id,user_id,active,joined_at) VALUES (?,?,1,?)', squadId, userId, stamp());
-      run('DELETE FROM matchmaking_queue WHERE user_id=?', userId);
+      recovery.order(squadId, userId);
+      if (!demo) recovery.attach(squadId, userId);
+      if (!demo) run('DELETE FROM matchmaking_queue WHERE user_id=?', userId);
     }
     const tasks = plan.weeks.flatMap(week => week.tasks);
     for (const [index, meeting] of schedule.meetings.entries()) run('INSERT INTO meetings(id,sprint_id,starts_at,ends_at,window_ends_at,topic,week) VALUES (?,?,?,?,?,?,?)', id(), sprintId, meeting.startsAt, meeting.endsAt, meeting.windowEndsAt, tasks[index].title, meeting.week);
@@ -272,10 +302,10 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       refreshLifecycle();
       expireSearches();
       // Membership changes and queue consumption share this BEGIN IMMEDIATE lock.
-      run("DELETE FROM matchmaking_queue WHERE user_id IN (SELECT m.user_id FROM memberships m JOIN sprints s ON s.squad_id=m.squad_id WHERE m.active=1 AND s.status IN ('forming','ready','active'))");
-      let queued = all("SELECT u.id,u.profile,m.queued_at FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting' ORDER BY m.queued_at,m.rowid").map(row => ({ ...JSON.parse(row.profile), id: row.id, queuedAt: row.queued_at }));
+      run("DELETE FROM matchmaking_queue WHERE user_id IN (SELECT m.user_id FROM memberships m JOIN sprints s ON s.squad_id=m.squad_id JOIN squads q ON q.id=s.squad_id JOIN users u ON u.id=m.user_id WHERE q.is_demo=0 AND q.track_id=json_extract(u.profile,'$.trackId') AND m.active=1 AND s.status IN ('forming','ready','active'))");
+      let queued = all("SELECT u.id,u.profile,m.queued_at FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting' ORDER BY m.queued_at,m.rowid").map(row => ({ ...JSON.parse(row.profile), id: row.id, queuedAt: row.queued_at, busyMeetings: occupiedMeetings(row.id) }));
       const open = all("SELECT q.*,s.id AS sprint_id,s.status,s.starts_at,s.ends_at,s.timezone,s.plan FROM squads q JOIN sprints s ON s.squad_id=q.id WHERE q.auto_matched=1 AND s.status='ready' AND s.starts_at > ? ORDER BY s.starts_at,q.display_number", stamp()).filter(row => isActiveTrack(row.track_id) && members(row.id).length === 3);
-      const fingerprint = JSON.stringify([queued.map(person => [person.id, person.trackId, person.level, person.timezone, person.availability, person.queuedAt, cohortStart(person.timezone, now())]), open.map(row => [row.id, members(row.id).map(member => member.id)])]);
+      const fingerprint = JSON.stringify([queued.map(person => [person.id, person.trackId, person.level, person.timezone, person.availability, person.busyMeetings, person.queuedAt, cohortStart(person.timezone, now())]), open.map(row => [row.id, members(row.id).map(member => member.id)])]);
       if (fingerprint === lastMatchFingerprint) return;
       lastMatchFingerprint = fingerprint;
       // A fourth searching learner may join an automatically created future team.
@@ -285,6 +315,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
         });
         if (!candidate) continue;
         run('INSERT INTO memberships(squad_id,user_id,active,joined_at,left_at) VALUES (?,?,1,?,NULL) ON CONFLICT(squad_id,user_id) DO UPDATE SET active=1,joined_at=excluded.joined_at,left_at=NULL', row.id, candidate.id, stamp());
+        recovery.order(row.id, candidate.id); recovery.attach(row.id, candidate.id);
         run('DELETE FROM matchmaking_queue WHERE user_id=?', candidate.id);
         queued = queued.filter(person => person.id !== candidate.id);
       }
@@ -331,7 +362,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const past = meeting.endsAt <= stamp();
       return { ...meeting, meetUrl: past || (membership.active && readiness.allReady && readiness.status === 'ready') ? meeting.meetUrl : '', readiness };
     });
-    return { chatUnread: membership.active ? q('SELECT COUNT(*) AS n FROM chat_messages WHERE squad_id=? AND user_id<>? AND id>COALESCE((SELECT last_id FROM chat_reads WHERE squad_id=? AND user_id=?),0)', squadId,user.id,squadId,user.id).n : 0, squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }), assignments: assignmentResults(row.sprint_id, m.id).filter(result => result.status === 'submitted').map(result => learning.accessByAssignment.get(result.week)?.unlocked ? result : { week: result.week, status: result.status, locked: true }) }; }), isMember: !!membership.active, canEdit };
+    return { recovery: recovery.view(squadId, user.id), chatUnread: membership.active ? q('SELECT COUNT(*) AS n FROM chat_messages WHERE squad_id=? AND user_id<>? AND id>COALESCE((SELECT last_id FROM chat_reads WHERE squad_id=? AND user_id=?),0)', squadId,user.id,squadId,user.id).n : 0, squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }), assignments: assignmentResults(row.sprint_id, m.id).filter(result => result.status === 'submitted').map(result => learning.accessByAssignment.get(result.week)?.unlocked ? result : { week: result.week, status: result.status, locked: true }) }; }), isMember: !!membership.active, canEdit };
   }
   function assignmentResults(sprintId, userId) {
     return all('SELECT * FROM weekly_submissions WHERE sprint_id=? AND user_id=? ORDER BY week', sprintId, userId).map(saved => ({ week: saved.week, status: saved.status, text: saved.text, url: saved.url, checkedCriteria: JSON.parse(saved.checked), updatedAt: saved.updated_at }));
@@ -341,7 +372,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const answers = JSON.parse(saved.answers), quiz = plan.weeks.flatMap(week => week.tasks).find(task => task.id === saved.task_id)?.quiz;
       return { taskId: saved.task_id, answers, score: saved.score, total: saved.total, passed: !!saved.passed, attempts: saved.attempts, updatedAt: saved.updated_at, feedback: quiz ? gradeQuiz(quiz, answers)?.feedback || [] : [] };
     });
-    return planAccess({ plan, progress: results(row.sprint_id, userId, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status, learningMode: row.learning_mode }, meetings: meetingRows(row.sprint_id), quizResults, assignments: assignmentResults(row.sprint_id, userId), credits: all('SELECT item_id FROM learning_credits WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(item => item.item_id), now: now(), canEdit });
+    return planAccess({ plan, progress: results(row.sprint_id, userId, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status, learningMode: row.learning_mode, releaseDates: Object.fromEntries(all('SELECT week,release_at FROM course_release_dates WHERE sprint_id=?', row.sprint_id).map(item => [item.week,item.release_at])) }, meetings: meetingRows(row.sprint_id), quizResults, assignments: assignmentResults(row.sprint_id, userId), credits: all('SELECT item_id FROM learning_credits WHERE sprint_id=? AND user_id=?', row.sprint_id, userId).map(item => item.item_id), now: now(), canEdit });
   }
   function meetingOrganizer(squadId) {
     return members(squadId).find(member => !!meetAdapter || googleMeet.connected(member.id))?.id || null;
@@ -367,11 +398,12 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     return { eligible, selfReady: activeMember && !!roster.find(person => person.id === selfId)?.ready, readyCount, totalCount: roster.length, members: activeMember ? roster : [], allReady, status, ...(error ? { error } : {}), ...(meeting.meet_url ? { launchId: launch?.launch_id || `${meetingId}:${hash(meeting.meet_url).slice(0,16)}` } : {}) };
   }
   function canJoin(user, row) {
+    if (row.is_demo) throw new AppError(403, 'Demo squads are private examples and cannot recruit real learners.', 'demo_squad');
     requireActiveTrack(row.track_id);
     if (row.learning_mode === 'solo' || user.learningMode === 'solo') throw new AppError(409, 'Choose squad learning before joining a team.', 'solo_course');
     if (!['forming', 'ready'].includes(row.status) || row.starts_at <= stamp()) throw new AppError(409, 'Recruitment has closed for this squad.', 'recruitment_closed');
     if (members(row.id).length >= 4) throw new AppError(409, 'This squad just filled up. Search for another squad.', 'squad_full');
-    if (user.trackId !== row.track_id || user.level !== row.level || scheduleConflicts(user, meetingRows(row.sprint_id)).length) throw new AppError(409, 'This squad does not fit your track, level, or all eight meeting windows.', 'incompatible_schedule');
+    if (user.trackId !== row.track_id || user.level !== row.level || scheduleConflicts({ ...user, busyMeetings: occupiedMeetings(user.id) }, meetingRows(row.sprint_id)).length) throw new AppError(409, 'This squad does not fit your track, level, or all eight meeting windows.', 'incompatible_schedule');
   }
   function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
   async function body(req) {
@@ -440,6 +472,21 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, bootstrap(user));
     }
     requireUser(user, false);
+    if (method === 'POST' && ['/api/solo', '/api/matchmaking', '/api/matchmaking/poll'].includes(pathname) && data.trackId !== undefined && data.trackId !== user.trackId) throw new AppError(409, 'Your selected course changed in another page. Refresh before continuing.', 'course_selection_changed');
+    if (pathname === '/api/demo/start' && method === 'POST') return json(res, 200, demoSquads.start(user, data.trackId || 'python', data.restart === true));
+    const recoveryRoute = pathname.match(/^\/api\/squads\/([^/]+)\/recovery$/);
+    if (recoveryRoute && method === 'POST') {
+      authorizeMember(recoveryRoute[1], user);
+      const result = recovery.choose(recoveryRoute[1], user, data);
+      lastMatchFingerprint = null; refreshLifecycle();
+      if (result.searching) attemptMatchmaking();
+      return json(res, 200, { ...result, squadId: result.squadId || (result.searching ? current(user.id, squadRow(recoveryRoute[1]).track_id) : null) });
+    }
+    const demoScenario = pathname.match(/^\/api\/squads\/([^/]+)\/demo-scenario$/);
+    if (demoScenario && method === 'POST') {
+      transaction(() => { authorizeMember(demoScenario[1], user, true); demoSquads.shrink(demoScenario[1], user, data.remaining); refreshLifecycle(); });
+      return json(res, 200, dashboard(demoScenario[1], user));
+    }
     if (attachmentUpload && method === 'GET') return json(res, 200, { attachments: chatAttachments.drafts(attachmentUpload[1], user) });
     const attachmentRoute = pathname.match(/^\/api\/squads\/([^/]+)\/chat\/attachments\/([a-f0-9-]{36})$/);
     if (attachmentRoute && ['GET', 'DELETE'].includes(method)) {
@@ -462,7 +509,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (method === 'POST' && pathname === '/api/solo') {
       requireUser(user); requireActiveTrack(user.trackId);
       const squadId = transaction(() => {
-        if (current(user.id)) throw new AppError(409,'You already have an unfinished course.','active_squad');
+        if (current(user.id)) throw new AppError(409,'You already have an active enrollment in this course.','active_squad');
         if (user.learningMode !== 'solo') fail('Choose independent learning in your profile.');
         rate(`solo:${user.id}`,5,3600000);
         const start = stamp();
@@ -476,7 +523,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     }
     if (method === 'POST' && pathname === '/api/google-meet/connect') {
       if (typeof data.squadId !== 'string') fail('Choose your squad before connecting Google Meet.');
-      authorizeMember(data.squadId, user, true);
+      if (authorizeMember(data.squadId, user, true).row.is_demo) throw new AppError(409, 'Use the simulated call in this demo squad.', 'demo_squad');
       if (!googleMeet.configured) throw new AppError(503, 'Automatic Google Meet needs to be configured by the site owner first.', 'meet_setup_required');
       rate(`google-connect:${user.id}`, 8, 3600000);
       try { return json(res, 200, await googleMeet.begin(user.id, data.squadId)); }
@@ -523,6 +570,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
           chatAttachments.claim(attachmentIds, created, squadId, user.id);
           return created;
         });
+        demoSquads.reply(squadId, messageId);
         return json(res, 201, { message: message(q('SELECT * FROM chat_messages WHERE id=?', messageId)) });
       }
       if (method === 'PUT' && action === 'read') {
@@ -535,6 +583,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     const readinessRoute = pathname.match(/^\/api\/squads\/([^/]+)\/meetings\/([^/]+)\/(readiness|launch)$/);
     if (readinessRoute) {
       const [, squadId, meetingId, action] = readinessRoute;
+      if (squadRow(squadId).is_demo) throw new AppError(409, 'Use the simulated call in this demo squad.', 'demo_squad');
       if (method === 'PUT' && action === 'readiness') {
         if (typeof data.ready !== 'boolean') fail('Readiness must be true or false.');
         transaction(() => {
@@ -626,12 +675,12 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     }
     if (method === 'PUT' && pathname === '/api/profile') {
       transaction(() => {
-        const activeId = current(user.id);
+        const activeId = current(user.id, data.trackId);
         const next = validateProfile(data, { allowedArchivedTrackId: activeId ? squadRow(activeId).track_id : undefined });
         if (activeId) {
           const active = squadRow(activeId);
-          if ((next.learningMode || 'squad') !== active.learning_mode) throw new AppError(409, 'Finish or leave your current course before changing its format.', 'active_squad');
-          if (active.track_id !== next.trackId || active.level !== next.level) throw new AppError(409, 'Leave your current squad before changing track or level.', 'active_squad');
+          if ((next.learningMode || 'squad') !== active.learning_mode) throw new AppError(409, 'This enrolled course keeps its current format. Choose another course to add more learning.', 'active_squad');
+          if (active.track_id !== next.trackId || active.level !== next.level) throw new AppError(409, 'This enrolled course keeps its starting level. You can enroll in a different course separately.', 'active_squad');
           const conflicts = scheduleConflicts(next, meetingRows(active.sprint_id));
           if (conflicts.length && data.confirmConflict !== true) throw new AppError(409, 'Your new availability conflicts with the existing squad schedule. Keep the commitment explicitly or leave the squad.', 'schedule_conflict', { conflicts });
         }
@@ -653,7 +702,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       requireUser(user);
       requireActiveTrack(user.trackId);
       if (user.learningMode === 'solo') fail('Independent courses do not have squad meetings.');
-      const preview = generateSchedule(user, data.slots, now());
+      const preview = generateSchedule({ ...user, busyMeetings: occupiedMeetings(user.id) }, data.slots, now());
       const tasks = trackById(user.trackId).weeks.flatMap(w => w.tasks);
       preview.meetings.forEach((meeting, i) => meeting.topic = tasks[i].title);
       return json(res, 200, preview);
@@ -661,7 +710,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (method === 'POST' && pathname === '/api/squads') {
       requireUser(user);
       const created = transaction(() => {
-        if (current(user.id)) throw new AppError(409, 'You already have an unfinished sprint.', 'active_squad');
+        if (current(user.id)) throw new AppError(409, 'You already have an active enrollment in this course.', 'active_squad');
         rate(`create:${user.id}`, 5, 3600000);
         if (user.learningMode === 'solo') fail('Start your independent course from checkout.');
         const schedule = generateSchedule(user, data.slots, now());
@@ -680,9 +729,10 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
         const row = squadRow(squadId);
         const existing = q('SELECT * FROM memberships WHERE squad_id = ? AND user_id = ?', squadId, user.id);
         if (existing?.active) { run('DELETE FROM matchmaking_queue WHERE user_id=?', user.id); return; }
-        if (current(user.id)) throw new AppError(409, 'You already have an unfinished sprint.', 'active_squad');
+        if (current(user.id, row.track_id)) throw new AppError(409, 'You already have an active enrollment in this course.', 'active_squad');
         canJoin(user, row);
         run('INSERT INTO memberships(squad_id,user_id,active,joined_at,left_at) VALUES (?,?,1,?,NULL) ON CONFLICT(squad_id,user_id) DO UPDATE SET active=1,joined_at=excluded.joined_at,left_at=NULL', squadId, user.id, stamp());
+        recovery.order(squadId, user.id); recovery.attach(squadId, user.id);
         run('DELETE FROM matchmaking_queue WHERE user_id=?', user.id);
         lastMatchFingerprint = null;
         refreshLifecycle();
@@ -696,6 +746,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (method === 'PUT' && action === 'meetings' && resourceId) {
       const { row } = authorizeMember(squadId, user, true);
       if (!q('SELECT id FROM meetings WHERE id=? AND sprint_id=?', resourceId, row.sprint_id)) throw new AppError(404, 'Meeting not found.', 'not_found');
+      if (row.is_demo) throw new AppError(409, 'Google Meet is not used in demo squads.', 'demo_squad');
       const url = meetUrl(data.url);
       if (q("SELECT meeting_id FROM meeting_launches WHERE meeting_id=? AND state='creating' AND started_at > ?", resourceId, new Date(now().getTime() - 60000).toISOString())) throw new AppError(409, 'A conference is being created. Please wait.', 'meet_creation_pending');
       run('UPDATE meetings SET meet_url=?,organizer_id=? WHERE id=?', url, url ? user.id : null, resourceId);
@@ -821,7 +872,10 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   });
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
+  const lifecycleTimer = setInterval(() => { try { refreshLifecycle(); } catch (error) { console.error('Lifecycle refresh failed:', error.message); } }, 60000);
+  lifecycleTimer.unref();
   function close() {
+    clearInterval(lifecycleTimer);
     if (closed) return Promise.resolve();
     closed = true;
     return new Promise(resolve => {

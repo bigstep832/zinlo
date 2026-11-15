@@ -8,6 +8,7 @@ export function coursePreview(course) {
 }
 
 function releaseForWeek(week, squad, meetings) {
+  if (squad.releaseDates?.[week]) return squad.releaseDates[week];
   if (week === 1) return squad.createdAt;
   const scheduled = meetings.filter(meeting => meeting.week === week).map(meeting => meeting.startsAt).sort()[0];
   if (scheduled) return scheduled;

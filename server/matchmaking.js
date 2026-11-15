@@ -39,7 +39,7 @@ export function findAutomaticGroup(profiles, now = new Date()) {
   if (profiles.length < 3) return null;
   const fitsCache = new Map();
   const windowsCache = new Map();
-  const signatures = new Map(profiles.map(profile => [profile.id, JSON.stringify([profile.timezone, profile.availability])]));
+  const signatures = new Map(profiles.map(profile => [profile.id, JSON.stringify([profile.timezone, profile.availability, profile.busyMeetings || []])]));
   function fits(profile, window) {
     const key = `${signatures.get(profile.id)}:${window.meetings.map(m => m.startsAt).join(',')}`;
     if (!fitsCache.has(key)) fitsCache.set(key, window.meetings.every(meeting => meetingFits(profile, meeting)));

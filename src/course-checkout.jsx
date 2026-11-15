@@ -6,7 +6,7 @@ export function Checkout({ boot, api, refresh, go }) {
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
   const track=boot.tracks.find(course=>course.id===boot.user?.trackId);
   const solo=boot.user?.learningMode==='solo', price=solo?19:29;
-  async function continueFree(){if(busy)return;setBusy(true);setError('');try{const result=await api(solo?'/solo':'/matchmaking','POST',{});await refresh();go(solo?`/squads/${result.squadId}`:'/matches');}catch(e){setError(e.message);}finally{setBusy(false);}}
+  async function continueFree(){if(busy)return;setBusy(true);setError('');try{const result=await api(solo?'/solo':'/matchmaking','POST',{trackId:track.id});await refresh();go(solo?`/squads/${result.squadId}`:'/matches');}catch(e){setError(e.message);}finally{setBusy(false);}}
   if(boot.currentSquadId)return <section className="panel narrow"><h1>Your course is already reserved</h1><p>No payment is needed in this demo.</p><button className="primary" onClick={()=>go(`/squads/${boot.currentSquadId}`)}>Open my course</button></section>;
   if(!track)return <section className="panel narrow"><h1>Choose your course first</h1><button className="primary" onClick={()=>go('/start')}>Choose a course</button></section>;
   const [headline,description]=OUTCOMES[track.id]||['Build a skill you can use.',track.project];

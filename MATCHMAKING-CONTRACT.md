@@ -32,3 +32,9 @@ Add persisted stable positive integer display_number to squads safely (migration
 - Matched screen names real teammates, course/level, numeric squad name, all eight dates in user's zone, `Open my squad`. No extra Join needed, automatic assignment already happened. Explain place is reserved; dashboard leave remains available.
 - Preserve guest/profile/history flows. Respect prefers-reduced-motion and accessible live status; spinner aria-hidden, no flashing.
 - Remove old manual group search/creation from primary UI; server endpoints retained for compatibility/tests.
+
+## Parallel course enrollments
+
+The one-unfinished-sprint limit is now scoped to a track, not to a person. `My courses` exposes all active real enrollments. All eight one-hour windows are checked against the learner's occupied meetings in other unfinished real courses; adjacent windows may meet at an endpoint but cannot overlap. These busy intervals participate in candidate signatures, window intersection, final transactional creation, preview and join checks. Demo meetings never reserve real availability.
+
+A separate, explicit `Try a demo squad` flow creates two clearly labelled simulated teammates. It never adds them to the live queue or recruitment results, changes a real enrollment, or claims to be a real match. Real search expiry and one search per learner are unchanged.

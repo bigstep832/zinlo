@@ -6,3 +6,5 @@ body{background:#fff}button,.button{border-color:#b5bfce;border-radius:7px;color
 .site-home{max-width:1304px;padding:0 0 28px}.video-play{position:absolute;inset:auto 15px 55px;z-index:1;background:white}
 progress{appearance:none;border:0;overflow:hidden;background:#e4e9f2;color:var(--blue)}progress::-webkit-progress-bar{background:#e4e9f2;border-radius:8px}progress::-webkit-progress-value{background:var(--blue);border-radius:8px}progress::-moz-progress-bar{background:var(--blue);border-radius:8px}.sidebar-footer progress::-webkit-progress-bar{background:#6380e4}.sidebar-footer progress::-webkit-progress-value{background:#fff}.sidebar-footer progress::-moz-progress-bar{background:#fff}
 @media(max-width:1390px){.site-home{margin-left:5%;margin-right:5%;padding-left:0;padding-right:0}}
+
+.brand{display:inline-flex;align-items:center;gap:10px;font-weight:800;color:#111d34}.brand img{display:block;flex:none;width:42px;height:30px}

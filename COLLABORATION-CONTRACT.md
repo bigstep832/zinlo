@@ -46,3 +46,11 @@ Cloudflare credentials are generated server-side with a 7,200-second TTL. The pe
 The full suite has 89 passing tests, including attachment privacy before/after publishing, persistence, idempotency, ownership, size/count limits, image conversion, completed/departed-member access; video permissions, media-state updates, readiness, targeted signaling, duplicate tabs, heartbeat expiry and restart behavior.
 
 Browser acceptance used three synthetic guest accounts and six real incoming 320×240 video streams, first directly and then with `iceTransportPolicy: relay`. In the relay run all six connections selected relay candidates, each video rendered more than 100 frames and no errors were reported. Test streams came from canvases; this verifies actual WebRTC video transport without opening the owner’s camera or microphone. It does not replace testing physical devices or every network/browser combination.
+
+## Explicit demonstration and team recovery
+
+Demo membership is private and server-generated; fake users have no guest sessions. Scripted chat messages say they are samples. Video DTOs label demo participants; they are considered ready for the demonstration but excluded from WebRTC negotiation and TURN credential generation. Google Meet and manually supplied Meet links are disabled for demos. Real meetings retain existing peer/TURN behavior.
+
+An established squad falling below its threshold gets a recovery case. Both remaining people may consent to a two-person threshold; another departure opens a new case. Otherwise each may select solo, replacement or a demo refund. Deadline is the earlier of 48 hours, future cohort start, and cohort end. Formation failure refunds 100%; later failure freezes the fraction of unstarted meetings. Prior voluntary leavers receive no automatic incident entitlement. Orders/receipts currently represent $0 demo transactions only. Existing notes and plans are never deleted.
+
+Profile guidelines remind users to avoid insults, harassment and spam and communicate schedule changes. They are not individual disciplinary findings. No reports, moderator queue, fines or sanctions are enabled.

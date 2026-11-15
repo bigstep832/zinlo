@@ -40,7 +40,7 @@ export function createVideoRooms({ authorizeMember, meetingReadiness, members, n
     let room = rooms.get(key);
     if (action === 'join') {
       rate(`video-join:${user.id}`, 12, 60000);
-      const servers = await iceServers(user.id);
+      const servers = row.is_demo ? [] : await iceServers(user.id);
       // Membership and the next eligible meeting can change during the relay request.
       const current = authorizeMember(squadId, user, true);
       if (!meetingReadiness(current.row, meetingId, user.id).eligible) throw new AppError(409, 'Only your next squad meeting can open a video room.', 'meeting_not_eligible');
@@ -66,7 +66,7 @@ export function createVideoRooms({ authorizeMember, meetingReadiness, members, n
       if (typeof data.ready !== 'boolean') fail('Choose your readiness.');
       peer.ready = data.ready;
     }
-    const allReady = roster.length >= 2 && roster.every(member => [...room.peers.values()].some(person => person.userId === member.id && person.ready));
+    const allReady = roster.length >= 2 && roster.every(member => row.is_demo && member.isDemo || [...room.peers.values()].some(person => person.userId === member.id && person.ready));
     if (allReady) room.started = true;
     if (action === 'signal') {
       rate(`video-signal:${user.id}`, 400, 60000);
@@ -84,8 +84,8 @@ export function createVideoRooms({ authorizeMember, meetingReadiness, members, n
     if (!['poll', 'ready'].includes(action)) throw new AppError(404, 'Video action not found.', 'not_found');
     if (data.after !== undefined && (!Number.isSafeInteger(data.after) || data.after < 0)) fail('Invalid signal cursor.');
     return {
-      started: room.started, allReady,
-      participants: roster.map(member => { const person = [...room.peers.values()].find(item => item.userId === member.id); return { userId: member.id, name: member.name, avatarUrl: member.avatarUrl, peerId: person?.id, ready: !!person?.ready, present: !!person, media: person?.media || null }; }),
+      started: room.started, allReady, isDemo: !!row.is_demo,
+      participants: roster.map(member => { const person = [...room.peers.values()].find(item => item.userId === member.id); const simulated = !!row.is_demo && member.isDemo; return { userId: member.id, name: member.name, avatarUrl: member.avatarUrl, peerId: simulated ? `demo:${member.id}` : person?.id, isDemo: simulated, ready: simulated || !!person?.ready, present: simulated || !!person, media: simulated ? { audio: false, video: false } : person?.media || null }; }),
       signals: room.signals.filter(signal => signal.to === peer.id && signal.id > (data.after || 0)).map(({ id, from, signal }) => ({ id, from, signal })),
       cursor: room.sequence,
     };

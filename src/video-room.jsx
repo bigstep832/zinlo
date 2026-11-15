@@ -39,7 +39,7 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
         setState(result);
         if (result.started && readyRef.current) {
           if (!mesh.current) mesh.current = new SquadVideoMesh({ peerId: current.peerId, iceServers: current.iceServers, stream: local.current, signal: (to, signal) => api(`${path}/signal`, 'POST', { peerId: current.peerId, to, signal }), onStream: (id, value) => { if (!cancelled) setRemote(existing => ({ ...existing, [id]: value })); }, onState: (id, value) => { if (!cancelled) setConnections(existing => ({ ...existing, [id]: value })); }, onError: e => { if (!cancelled) setError(e.message); } });
-          const peers = result.participants.filter(person => person.ready && person.peerId !== current.peerId).map(person => person.peerId);
+          const peers = result.participants.filter(person => person.ready && !person.isDemo && person.peerId !== current.peerId).map(person => person.peerId);
           await mesh.current.sync(peers);
           for (const item of result.signals) if (peers.includes(item.from)) await mesh.current.receive(item.from, item.signal);
         }
@@ -97,10 +97,10 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
     <div className="video-stage">
       <div className="video-grid" data-participants={state?.participants.length || 1}>
         <VideoTile stream={stream} name={selfName} avatarUrl={state?.participants.find(person => person.peerId === session?.peerId)?.avatarUrl} self cameraOff={!camera} status={hasVideo && !camera ? 'Camera off' : ready ? 'Ready' : 'Your preview'} />
-        {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} cameraOff={person.media?.video === false} status={connections[person.peerId] === 'connected' ? (person.media?.video === false ? 'Camera off' : 'Connected') : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
+        {state?.participants.filter(person => person.peerId !== session?.peerId).map(person => <VideoTile key={person.userId} stream={remote[person.peerId]} name={person.name} avatarUrl={person.avatarUrl} cameraOff={person.media?.video === false} status={person.isDemo ? 'Simulated teammate' : connections[person.peerId] === 'connected' ? (person.media?.video === false ? 'Camera off' : 'Connected') : person.ready ? 'Ready' : person.present ? 'Getting ready' : 'Not here yet'} />)}
       </div>
       <div className="call-controls" role="group" aria-label="Call controls">
-        <p className={`call-status${inCall ? ' call-status-live' : ''}`} role="status"><span className="call-status-dot" aria-hidden="true" />{ended ? 'Call disconnected' : !state ? 'Opening room…' : inCall ? `${connected} connected` : `${readyCount} of ${state.participants.length} ready`}</p>
+        <p className={`call-status${inCall ? ' call-status-live' : ''}`} role="status"><span className="call-status-dot" aria-hidden="true" />{ended ? 'Call disconnected' : !state ? 'Opening room…' : inCall ? (state.isDemo ? 'Demo call · simulated teammates' : `${connected} connected`) : `${readyCount} of ${state.participants.length} ready`}</p>
         <div className="call-actions">
           <CallControl label={hasAudio ? (mic ? 'Mute microphone' : 'Unmute microphone') : 'Enable microphone'} icon={hasAudio && mic ? Mic : MicOff} tone={!hasAudio || !mic ? 'call-device-off' : ''} aria-pressed={hasAudio && mic} disabled={busy || !session || ended} onClick={() => hasAudio ? toggle('audio') : enableMedia('audio')} />
           <CallControl label={hasVideo ? (camera ? 'Turn camera off' : 'Turn camera on') : 'Enable camera'} icon={hasVideo && camera ? Video : VideoOff} tone={!hasVideo || !camera ? 'call-device-off' : ''} aria-pressed={hasVideo && camera} disabled={busy || !session || ended} onClick={() => hasVideo ? toggle('video') : enableMedia('video')} />
@@ -113,6 +113,6 @@ export function VideoRoom({ squadId, meetingId, api, onLeave }) {
       </div>
     </div>
     <p className="room-hint">{!ready ? 'Turn on your mic or camera, or join to listen. The call starts when everyone is ready.' : !stream ? 'Listening only. You can enable your mic or camera at any time.' : !inCall ? 'You’re ready. Your mic and camera are shared when everyone joins.' : 'Use the mic and camera buttons any time. Leave the call to return to your squad.'}</p>
-    <details className="room-help"><summary>Call details</summary><p>This site does not record calls. Camera and microphone access starts only when you enable it.</p>{session && !session.relayConfigured && <p>If your network blocks the call, try another network or Google Meet from the Meetings page.</p>}</details>
+    <details className="room-help"><summary>Call details</summary><p>This site does not record calls. Camera and microphone access starts only when you enable it.</p>{session && !state?.isDemo && !session.relayConfigured && <p>If your network blocks the call, try another network or Google Meet from the Meetings page.</p>}</details>
   </section>;
 }

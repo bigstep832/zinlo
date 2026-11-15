@@ -57,6 +57,7 @@ export function meetingFits(profile, meeting) {
   const start = DateTime.fromISO(meeting.startsAt, { zone: 'utc' });
   const end = DateTime.fromISO(meeting.windowEndsAt, { zone: 'utc' });
   if (!start.isValid || !end.isValid || end <= start) return false;
+  if (profile.busyMeetings?.some(other => start.toMillis() < Date.parse(other.windowEndsAt) && end.toMillis() > Date.parse(other.startsAt))) return false;
   // Inspect every minute of the actual hour, including day and DST changes.
   for (let stamp = start.toMillis(); stamp < end.toMillis(); stamp += 60000) {
     const local = DateTime.fromMillis(stamp, { zone: profile.timezone });

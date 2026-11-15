@@ -5,7 +5,7 @@ import './avatar.css';
 export function Avatar({ name = '', src, size = 44 }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
-  const initials = name.trim().split(/\s+/).slice(0,2).map(word => word[0]).join('').toUpperCase() || '?';
+  const initials = name.replace(/\s*\(demo\)$/, '').trim().split(/\s+/).slice(0,2).map(word => word[0]).join('').toUpperCase() || '?';
   const tone = [...name].reduce((n,c) => n+c.charCodeAt(0),0) % 4;
   return <span className={`profile-avatar tone-${tone}`} style={{width:size,height:size,fontSize:Math.max(14,size*.32)}} aria-hidden="true">{src && !failed ? <img src={src} alt="" onError={() => setFailed(true)} /> : initials}</span>;
 }
