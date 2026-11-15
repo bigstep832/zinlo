@@ -1,5 +1,13 @@
 # Zinlo
 
+## Live demo
+
+**[Open Zinlo](https://informative-educated-workstation-symbol.trycloudflare.com/)**
+
+If the original demo link is unavailable, use the link above. This is a temporary preview hosted from the project owner's computer; it is available while the server is running.
+
+To explore with one device, choose a course, complete the demo checkout, and select **Try a demo squad** on the teammate search screen. The two simulated teammates are clearly labelled; no payment or extra accounts are needed.
+
 Рабочий MVP для совместного обучения: React, Node.js 24, SQLite. Интерфейс на английском использует выбранный синий дизайн Project Studio. Данные сохраняются сервером; в обычном приложении нет автоматически созданных людей или команд.
 
 ## Запуск
