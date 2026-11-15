@@ -1,4 +1,5 @@
 import { activeTracks } from './course-catalog.js';
+import { lessonMaterials } from './lesson-materials.js';
 
 function week(number, title, preparation, tasks) {
   return { week: number, title, preparation, tasks: tasks.map(([title, description, criteria], i) => ({ id: `week-${number}-task-${i + 1}`, week: number, title, description, criteria })) };
@@ -69,6 +70,21 @@ export const archivedTracks = previousTracks.filter(track => track.id !== 'pytho
 }));
 export const trackById = id => [...tracks, ...archivedTracks].find(track => track.id === id);
 export const isActiveTrack = id => tracks.some(track => track.id === id);
+export function withLessonMaterials(plan, trackId) {
+  const course = tracks.find(track => track.id === trackId);
+  if (!course || !lessonMaterials[trackId]) return plan;
+  const currentTasks = new Map(course.weeks.flatMap(week => week.tasks).map(task => [task.id, task]));
+  let enriched = false;
+  const weeks = plan.weeks.map(week => ({ ...week, tasks: week.tasks.map(task => {
+    const original = currentTasks.get(task.id), lesson = lessonMaterials[trackId][task.id];
+    // IDs existed in earlier curricula too. Exact task text prevents attaching a
+    // new tutorial to an older task whose meaning changed. Saved plans stay intact.
+    if (task.lesson || !lesson || original?.title !== task.title || original?.description !== task.description) return task;
+    enriched = true;
+    return { ...task, lesson: structuredClone(lesson) };
+  }) }));
+  return enriched ? { ...plan, weeks } : plan;
+}
 export function basePlan(trackId, level) {
   const track = trackById(trackId);
   if (!track) throw new Error('Unknown learning track');
@@ -76,5 +92,5 @@ export function basePlan(trackId, level) {
   if (level === 'basics') for (const w of plan.weeks) {
     w.preparation += track.archived && trackId !== 'ai' ? ' Since you know the basics, bring one edge case and explain the trade-offs in your solution.' : !track.archived ? ' Use the extension challenge in each task to deepen your practice.' : '';
   }
-  return plan;
+  return withLessonMaterials(plan, trackId);
 }

@@ -110,13 +110,14 @@ test('guests complete the real creation, matching, joining and persisted-progres
   await b.ok(`/api/squads/${id}/meetings/${meetingId}`, 'PUT', { url: 'https://meet.google.com/abc-defg-hij' });
   assert.equal((await dashboard(a, id)).meetings.find(item => item.id === meetingId).meetUrl, '');
   for (const person of [a, b, c]) await person.ok(`/api/squads/${id}/meetings/${meetingId}/readiness`, 'PUT', { ready: true });
+  const expectedPlan = (await dashboard(a, id)).plan;
   await f.restart();
   assert.equal((await a.ok('/api/bootstrap')).currentSquadId, id);
   const persisted = await dashboard(a, id);
   assert.equal(persisted.progress.find(item => item.taskId === tasks[0].id).status, 'done');
   assert.equal(persisted.progress.find(item => item.taskId === tasks[0].id).note, 'Added my first habit without a GitHub account.');
   assert.equal(persisted.meetings.find(item => item.id === meetingId).meetUrl, 'https://meet.google.com/abc-defg-hij');
-  assert.deepEqual(persisted.plan, ready.plan);
+  assert.deepEqual(persisted.plan, expectedPlan);
   assert.ok(!(await dashboard(b, id)).progress.some(item => item.status === 'done'));
 });
 
@@ -424,7 +425,8 @@ test('progress saved while AI is pending wins without losing work or rewriting i
     assert.equal(result.body.code, 'plan_locked');
     const after = await dashboard(b, id);
     assert.equal(after.plan.source, 'base');
-    assert.deepEqual(after.plan.weeks, before.plan.weeks);
+    assert.deepEqual(after.plan.weeks.map(week => week.tasks.map(task => task.title)), before.plan.weeks.map(week => week.tasks.map(task => task.title)));
+    assert.equal(after.plan.weeks[0].tasks[0].description, before.plan.weeks[0].tasks[0].description);
     assert.equal(after.progress.find(item => item.taskId === taskId).status, 'done');
     assert.equal(after.progress.find(item => item.taskId === taskId).note, 'Saved during adaptation');
   } finally {

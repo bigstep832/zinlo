@@ -49,7 +49,7 @@ async function fixture(t, options = {}) {
 const dashboard = (person, id) => person.ok(`/api/squads/${id}`);
 const createSquad = async person => (await person.ok('/api/squads', 'POST', { slots })).squadId;
 
-test('new learners receive three active courses with complete practice materials and separate archive metadata', async t => {
+test('new learners receive three active course previews and separate archive metadata without full materials', async t => {
   const f = await fixture(t), guest = f.client();
   const boot = await guest.ok('/api/bootstrap');
   assert.deepEqual(boot.tracks.map(track => track.id), ['python', 'ai-literacy', 'spanish']);
@@ -59,10 +59,18 @@ test('new learners receive three active courses with complete practice materials
   for (const course of boot.tracks) {
     assert.deepEqual(course.levels.map(level => level.id), ['beginner', 'basics']);
     assert.equal(course.weeks.length, 4);
-    assert.equal(course.weeks.flatMap(week => week.tasks).length, 8);
-    for (const week of course.weeks) for (const task of week.tasks) {
+    assert.equal(course.weeks.reduce((sum, week) => sum + week.lessonCount, 0), 8);
+    assert.ok(course.weeks.every(week => !week.tasks && !week.preparation));
+    for (const week of trackById(course.id).weeks) for (const task of week.tasks) {
       assert.ok(task.steps?.length && task.practice?.length, `${course.id} ${task.id} needs actionable guidance and practice`);
       for (const field of ['title', 'description', 'criteria', 'example', 'extension']) assert.ok(typeof task[field] === 'string' && task[field].trim(), `${course.id} ${task.id} ${field}`);
+    }
+    for (const week of basePlan(course.id, 'beginner').weeks) for (const task of week.tasks) {
+      assert.ok(task.lesson?.objectives.length && task.lesson.sections.length, `${course.id} ${task.id} needs its own lesson material`);
+      assert.ok(task.lesson.sections.every(section => section.title && section.paragraphs.length));
+      assert.ok(task.lesson.exercise.prompt && task.lesson.exercise.checklist.length && task.lesson.exercise.sampleAnswer);
+      assert.ok(task.lesson.checks.length && task.lesson.checks.every(check => check.question && check.answer && check.explanation));
+      assert.ok(task.lesson.recap.length);
     }
   }
   await guest.ok('/api/session', 'POST', {});
@@ -93,7 +101,10 @@ test('automatic matching isolates all three active courses and saves their own d
     squadIds.add(matched.squadId);
     for (const person of [...people, third]) {
       const detail = await dashboard(person, matched.squadId);
-      assert.deepEqual(detail.plan.weeks, trackById(trackId).weeks);
+      const stored = JSON.parse(f.db().prepare('SELECT plan FROM sprints WHERE squad_id=?').get(matched.squadId).plan);
+      assert.deepEqual(stored.weeks, basePlan(trackId, 'beginner').weeks);
+      assert.equal(detail.plan.weeks[0].tasks[0].description, trackById(trackId).weeks[0].tasks[0].description);
+      assert.ok(detail.plan.weeks[1].tasks.every(task => task.access.unlocked === false && !task.description));
       assert.deepEqual(detail.meetings.map(meeting => meeting.topic), detail.plan.weeks.flatMap(week => week.tasks.map(task => task.title)));
     }
   }
@@ -128,7 +139,8 @@ test('existing JavaScript squad keeps its original plan, work, meeting link and 
   const migrated = await dashboard(people[0], id);
   assert.equal(migrated.squad.name, 'JavaScript Foundations #001');
   assert.equal(migrated.squad.trackId, 'javascript');
-  assert.deepEqual(migrated.plan, oldPlan);
+  assert.deepEqual(JSON.parse(f.db().prepare('SELECT plan FROM sprints WHERE squad_id=?').get(id).plan), oldPlan);
+  assert.equal(migrated.plan.weeks[0].tasks[0].description, oldPlan.weeks[0].tasks[0].description);
   assert.deepEqual(migrated.meetings.map(meeting => meeting.startsAt), before.meetings.map(meeting => meeting.startsAt));
   assert.equal(migrated.meetings[0].meetUrl, 'https://meet.google.com/abc-defg-hij');
   assert.equal(migrated.progress.find(task => task.taskId === taskId).note, 'My existing task planner result');
@@ -149,7 +161,8 @@ test('existing JavaScript squad keeps its original plan, work, meeting link and 
     assert.equal(denied.body.code, 'track_archived', path);
   }
   await people[0].ok(`/api/squads/${id}/leave`, 'POST', {});
-  assert.deepEqual((await dashboard(people[0], id)).plan, oldPlan);
+  assert.equal((await dashboard(people[0], id)).plan.weeks[0].tasks[0].description, oldPlan.weeks[0].tasks[0].description);
+  assert.deepEqual(JSON.parse(f.db().prepare('SELECT plan FROM sprints WHERE squad_id=?').get(id).plan), oldPlan);
   await people[0].ok('/api/profile', 'PUT', profile('Next subject', 'spanish'));
   assert.equal((await people[0].ok('/api/matchmaking', 'POST', {})).status, 'waiting');
 });
@@ -162,12 +175,14 @@ test('optional AI adaptation preserves detailed teaching material and the select
   const learner = await f.guest('Spanish continuation', 'spanish', 'basics');
   const id = await createSquad(learner);
   const before = await dashboard(learner, id);
+  const savedBefore = JSON.parse(f.db().prepare('SELECT plan FROM sprints WHERE squad_id=?').get(id).plan);
   assert.equal(before.plan.level, 'basics');
   await learner.ok(`/api/squads/${id}/adapt`, 'POST', {});
   const after = await dashboard(learner, id);
+  const savedAfter = JSON.parse(f.db().prepare('SELECT plan FROM sprints WHERE squad_id=?').get(id).plan);
   assert.equal(after.plan.source, 'ai');
   assert.equal(after.plan.level, 'basics');
   for (let week = 0; week < 4; week++) for (let task = 0; task < 2; task++) {
-    for (const field of ['steps', 'practice', 'example', 'extension']) assert.deepEqual(after.plan.weeks[week].tasks[task][field], before.plan.weeks[week].tasks[task][field]);
+    for (const field of ['steps', 'practice', 'example', 'extension', 'lesson']) assert.deepEqual(savedAfter.weeks[week].tasks[task][field], savedBefore.weeks[week].tasks[task][field]);
   }
 });

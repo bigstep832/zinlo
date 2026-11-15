@@ -4,10 +4,11 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tracks, archivedTracks, trackById, isActiveTrack, basePlan } from './curricula.js';
+import { tracks, archivedTracks, trackById, isActiveTrack, basePlan, withLessonMaterials } from './curricula.js';
 import { AppError, fail, validateProfile, generateSchedule, scheduleConflicts, cohortStart } from './scheduling.js';
 import { findAutomaticGroup, hasSeparateMeetingDays } from './matchmaking.js';
 import { createGoogleMeetService } from './google-meet.js';
+import { coursePreview, planAccess } from './progression.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -177,7 +178,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   function bootstrap(user) {
     const currentSquadId = user ? current(user.id) : null;
     const history = user ? all('SELECT squad_id FROM memberships WHERE user_id = ? ORDER BY joined_at DESC', user.id).filter(m => m.squad_id !== currentSquadId).map(m => summary(squadRow(m.squad_id))) : [];
-    return { user, tracks, archivedTracks, currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
+    return { user, tracks: tracks.map(coursePreview), archivedTracks: archivedTracks.map(coursePreview), currentSquadId, history, aiAvailable: !!adapter, matchmaking: user ? searchState(user.id) : { status: 'idle' } };
   }
   function retireArchivedSearches() {
     for (const person of all("SELECT m.user_id,u.profile FROM matchmaking_queue m JOIN users u ON u.id=m.user_id WHERE m.state='waiting'")) {
@@ -267,15 +268,18 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   }
   function dashboard(squadId, user) {
     const { row, membership } = authorizeMember(squadId, user);
-    const plan = JSON.parse(row.plan);
+    const plan = withLessonMaterials(JSON.parse(row.plan), row.track_id);
     const roster = members(squadId, true, user.id);
+    const progress = results(row.sprint_id, user.id, plan);
+    const canEdit = !!membership.active && unfinished.includes(row.status);
+    const learning = planAccess({ plan, progress, squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), now: now(), canEdit });
     const connection = { configured: meetConfigured, connected: !!meetAdapter || googleMeet.connected(user.id), organizerAvailable: !!meetingOrganizer(squadId), ...(!meetConfigured ? { message: 'Automatic Google Meet is not configured on this installation yet.' } : {}) };
     const meetings = meetingRows(row.sprint_id, true).map(meeting => {
       const readiness = meetingReadiness(row, meeting.id, user.id, !!membership.active);
       const past = meeting.endsAt <= stamp();
       return { ...meeting, meetUrl: past || (membership.active && readiness.allReady && readiness.status === 'ready') ? meeting.meetUrl : '', readiness };
     });
-    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan, progress: results(row.sprint_id, user.id, plan), teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: 8, results: p }; }), isMember: !!membership.active, canEdit: !!membership.active && unfinished.includes(row.status) };
+    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }) }; }), isMember: !!membership.active, canEdit };
   }
   function meetingOrganizer(squadId) {
     return members(squadId).find(member => !!meetAdapter || googleMeet.connected(member.id))?.id || null;
@@ -532,17 +536,22 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       return json(res, 200, { ok: true });
     }
     if (method === 'PUT' && action === 'progress' && resourceId) {
-      const { row } = authorizeMember(squadId, user, true);
-      if (!JSON.parse(row.plan).weeks.flatMap(w => w.tasks).some(t => t.id === resourceId)) throw new AppError(404, 'Task not found.', 'not_found');
       if (!['not_started', 'in_progress', 'done'].includes(data.status)) fail('Choose a valid task status.');
       const note = textField(data.note ?? '', 3000, 'Your notes');
       const url = resultUrl(data.url);
-      run('INSERT INTO progress(sprint_id,user_id,task_id,status,note,url) VALUES (?,?,?,?,?,?) ON CONFLICT(sprint_id,user_id,task_id) DO UPDATE SET status=excluded.status,note=excluded.note,url=excluded.url', row.sprint_id, user.id, resourceId, data.status, note, url);
+      transaction(() => {
+        const { row } = authorizeMember(squadId, user, true);
+        const plan = JSON.parse(row.plan);
+        const access = planAccess({ plan, progress: results(row.sprint_id, user.id, plan), squad: { createdAt: row.created_at, startsAt: row.starts_at, endsAt: row.ends_at, timezone: row.timezone, status: row.status }, meetings: meetingRows(row.sprint_id), now: now(), canEdit: true }).accessByTask.get(resourceId);
+        if (!access) throw new AppError(404, 'Task not found.', 'not_found');
+        if (!access.canEdit) throw new AppError(409, access.message || 'This lesson is not available yet.', 'lesson_locked', { access });
+        run('INSERT INTO progress(sprint_id,user_id,task_id,status,note,url) VALUES (?,?,?,?,?,?) ON CONFLICT(sprint_id,user_id,task_id) DO UPDATE SET status=excluded.status,note=excluded.note,url=excluded.url', row.sprint_id, user.id, resourceId, data.status, note, url);
+      });
       return json(res, 200, { ok: true });
     }
     if (method === 'POST' && action === 'adapt') {
       const { row } = authorizeMember(squadId, user, true);
-      const existing = JSON.parse(row.plan);
+      const existing = withLessonMaterials(JSON.parse(row.plan), row.track_id);
       if (existing.source === 'ai') return json(res, 200, { source: 'ai', message: 'This saved plan is already AI-adapted.' });
       const started = () => q("SELECT COUNT(*) AS n FROM progress WHERE sprint_id=? AND (status != 'not_started' OR note != '' OR url != '')", row.sprint_id).n > 0;
       if (started()) throw new AppError(409, 'Work has already started. The saved plan will stay unchanged.', 'plan_locked');
