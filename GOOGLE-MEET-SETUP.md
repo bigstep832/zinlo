@@ -27,7 +27,7 @@ Production HTTPS also needs `APP_ORIGIN` set to the exact public origin and secu
 ## Connect and use
 
 1. Open the same application URL as the rest of your squad and enter the squad workspace.
-2. One member selects **Connect Google Meet** and authorizes the limited Meet permission in Google.
+2. One member selects **Connect Google to organize** and authorizes the limited Meet permission in Google.
 3. Each member selects **I'm ready** under the nearest meeting and confirms they are ready to join now.
 4. When all current members are ready, the server creates and saves one conference. Everyone automatically navigates to that same Meet URL in the current tab. Returning to the app does not repeatedly redirect the same tab; **Join Google Meet** remains available.
 
@@ -37,6 +37,6 @@ Members can withdraw readiness while waiting. A new member must confirm independ
 
 A temporary tunnel hostname changes when the tunnel is recreated. Update the authorized redirect URI and both `GOOGLE_REDIRECT_URI` and `APP_ORIGIN` if that happens. Keep using the same browser and application hostname: guest sessions are tied to a cookie, and the Google callback must return to that session.
 
-Google OAuth apps in Testing can have restricted audiences and expiring grants. Reconnect if Google requests it. Before a general public release, use a stable domain and complete Google's applicable OAuth publication/verification requirements.
+The organizer connection persists on the server; it is not requested for every meeting. Google OAuth apps with an External audience and Testing status issue refresh tokens that expire after seven days for this Meet scope. The organizer must reconnect after expiration. Before a general public release, use a stable domain and complete Google's applicable OAuth publication/verification requirements. Moving out of Testing removes this testing-specific seven-day expiry, but users can still revoke authorization and Google can require reconnection for other reasons. See [Google's refresh token expiration rules](https://developers.google.com/identity/protocols/oauth2#expiration).
 
 References: [Create a Meet space](https://developers.google.com/workspace/meet/api/reference/rest/v2/spaces/create), [Meet authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize), [OAuth web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server).
