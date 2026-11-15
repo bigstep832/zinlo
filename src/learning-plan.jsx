@@ -59,9 +59,11 @@ function ResultEditor({ value, saved, editable, draft, state, onChange, onSave, 
   </form>;
 }
 
-export function LearningWorkspace({ activeTab, data, track, zone, selfId, request, openPlan, api, onSaved, aiAvailable, adapt, adapting, working }) {
-  const [selection, setSelection] = useState({ week: null, taskId: null });
-  const [lessonPart, setLessonPart] = useState('learn');
+export function LearningWorkspace({ activeTab, data, track, zone, selfId, route, base, navigate, api, onSaved, aiAvailable, adapt, adapting, working }) {
+  const segments = route.split('/');
+  const selection = segments[1] === 'assignments' ? { week: Number(segments[2]) || null, assignment: true } : { week: Number(segments[3]) || null, taskId: segments[5] || null };
+  const lessonPart = ['learn', 'practice', 'quiz', 'result'].includes(segments[6]) ? segments[6] : 'learn';
+  const setLessonPart = part => navigate(`${base}/plan/weeks/${selection.week}/lessons/${selection.taskId}/${part}`);
   const [drafts, setDrafts] = useState({});
   const [saveStates, setSaveStates] = useState({});
   const [quizDrafts, setQuizDrafts] = useState({});
@@ -103,21 +105,15 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
     });
   }, [progress]);
   useEffect(() => {
-    if (!request) return;
-    const task = tasks.find(item => item.id === request.taskId);
-    const week = task?.week ?? request.week;
-    if (week) { focusPending.current = true; setLessonPart('learn'); setSelection({ week, taskId: task?.access?.unlocked ? task.id : null, assignment: !!request.assignment }); }
-  }, [request]);
-  useEffect(() => {
     if (focusPending.current && ['plan', 'progress'].includes(activeTab)) { focusPending.current = false; headingRef.current?.focus(); }
   }, [selection.week, selection.taskId, selection.assignment, activeTab]);
   useEffect(() => { if (focusPart.current) { focusPart.current = false; partRef.current?.focus(); } }, [lessonPart]);
 
-  function showWeek(week) { focusPending.current = true; setSelection({ week, taskId: null }); openPlan(); }
-  function showTask(task, part = 'learn') { if (!task?.access?.unlocked) return; focusPending.current = true; setLessonPart(part); setSelection({ week: task.week, taskId: task.id }); openPlan(); }
+  function showWeek(week) { focusPending.current = true; navigate(`${base}/plan/weeks/${week}`); }
+  function showTask(task, part = 'learn') { if (!task?.access?.unlocked) return; focusPending.current = true; navigate(`${base}/plan/weeks/${task.week}/lessons/${task.id}/${part}`); }
   function showPart(part) { focusPart.current = true; setLessonPart(part); }
-  function showAllWeeks() { focusPending.current = true; setSelection({ week: null, taskId: null }); openPlan(); }
-  function showAssignment(week) { if (!week?.assignment?.access.unlocked) return; focusPending.current = true; setSelection({ week: week.week, taskId: null, assignment: true }); openPlan(); }
+  function showAllWeeks() { focusPending.current = true; navigate(`${base}/plan`); }
+  function showAssignment(week) { if (!week?.assignment?.access.unlocked) return; focusPending.current = true; navigate(`${base}/assignments/${week.week}`); }
   function updateQuiz(task, questionId, value) {
     setQuizDrafts(existing => ({ ...existing, [task.id]: { dirty: true, value: { ...(existing[task.id]?.value || task.quiz.result?.answers || {}), [questionId]: value } } }));
   }
@@ -180,7 +176,8 @@ export function LearningWorkspace({ activeTab, data, track, zone, selfId, reques
     return <section className="panel lesson-next"><h3>{following ? 'Your next step' : 'Course work completed'}</h3>{following ? <><p>{following.title}</p>{following.access?.unlocked ? <button className="primary" onClick={() => showTask(following)}>Continue to next lesson</button> : <AccessMessage access={following.access} zone={zone} />}</> : <p>You can review your lessons and saved work from any week.</p>}</section>;
   }
 
-  if (activeTab === 'overview') return null;
+  if (!['plan', 'progress'].includes(activeTab)) return null;
+  if (segments[1] === 'assignments' && !selection.week) return <div className="learning-workspace"><div className="learning-intro"><h1>Your weekly project.</h1><p>One practical step each week. Review your work with the checklist, submit it, then discuss it with your squad.</p></div><div className="stack">{plan.weeks.filter(week => week.assignment).map(week => <article className="panel lesson-choice" key={week.week}><div><p className="eyebrow">Week {week.week}</p><h2>{week.assignment.title}</h2><p className="muted">{week.assignment.result?.status === 'submitted' ? 'Submitted · Ready for squad discussion' : week.assignment.result?.status === 'draft' ? 'Your draft is saved' : 'Individual practice · Self-review'}</p><AccessMessage access={week.assignment.access} zone={zone} /></div><button disabled={!week.assignment.access.unlocked} onClick={() => showAssignment(week)}>{week.assignment.result?.status === 'submitted' ? 'Review work' : 'Open assignment'}</button></article>)}</div></div>;
   if (activeTab === 'progress') return <div className="learning-workspace">
     <section className="panel progress-summary"><h2 ref={headingRef} tabIndex={-1}>Your progress</h2><p className="lead"><strong>{done} of {total} lessons completed</strong></p>{data.learningProgress?.totalAssignments > 0 && <p>{data.learningProgress.assignmentsDone} of {data.learningProgress.totalAssignments} weekly assignments completed</p>}<progress value={done} max={total} aria-label={`${done} of ${total} lessons completed`} />{nextAssignment ? <><p>Next: <strong>{nextAssignment.assignment.title}</strong></p><button className="primary" onClick={() => showAssignment(nextAssignment)}>Open weekly assignment</button></> : suggested ? <><p>Next: <strong>{suggested.title}</strong></p><button className="primary" onClick={() => showTask(suggested)}>Continue learning</button></> : nextTask ? <><p>Next: <strong>{nextTask.title}</strong></p><AccessMessage access={nextTask.access} zone={zone} /></> : <p>Your saved work is available in the study plan.</p>}</section>
     <section className="panel"><h3>By week</h3><div className="week-progress-list">{plan.weeks.map(week => <div className="week-progress-row" key={week.week}><div><strong>Week {week.week} · {week.title}</strong><p className="muted">{weekDone(week)} of {week.tasks.length} lessons done · {weekStatus(week)}</p></div><button onClick={() => showWeek(week.week)}>View week {week.week}</button></div>)}</div></section>

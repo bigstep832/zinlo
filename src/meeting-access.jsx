@@ -24,7 +24,7 @@ export function useMeetingAccess({ squadId, data, receivedAt, change, suspended 
   const mounted = useRef(true);
   const attempted = useRef(new Set());
   const navigated = useRef(new Set());
-  const nearest = data?.meetings.find(meeting => new Date(meeting.endsAt).getTime() > Date.now());
+  const nearest = data?.meetings.find(meeting => meeting.readiness?.eligible) || data?.meetings.find(meeting => new Date(meeting.endsAt).getTime() > Date.now());
   const nextMeeting = waitingMeetingId ? data?.meetings.find(meeting => meeting.id === waitingMeetingId) : nearest;
   const readiness = nextMeeting?.readiness;
   const enabled = !!(data?.isMember && data.canEdit && readiness?.eligible && nextMeeting?.id === nearest?.id);

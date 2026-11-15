@@ -10,6 +10,7 @@ import { findAutomaticGroup, hasSeparateMeetingDays } from './matchmaking.js';
 import { createGoogleMeetService } from './google-meet.js';
 import { coursePreview, planAccess } from './progression.js';
 import { gradeQuiz } from './assessments.js';
+import { createVideoRooms } from './video-rooms.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const unfinished = ['forming', 'ready', 'active'];
@@ -80,6 +81,9 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     CREATE TABLE IF NOT EXISTS weekly_submissions (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), week INTEGER NOT NULL, status TEXT NOT NULL, text TEXT NOT NULL, url TEXT NOT NULL, checked TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(sprint_id,user_id,week));
     CREATE TABLE IF NOT EXISTS learning_credits (sprint_id TEXT NOT NULL REFERENCES sprints(id), user_id TEXT NOT NULL REFERENCES users(id), item_id TEXT NOT NULL, PRIMARY KEY(sprint_id,user_id,item_id));
     CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(squad_id,user_id,client_id));
+    CREATE TABLE IF NOT EXISTS chat_reads (squad_id TEXT NOT NULL REFERENCES squads(id), user_id TEXT NOT NULL REFERENCES users(id), last_id INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(squad_id,user_id));
+    CREATE INDEX IF NOT EXISTS chat_squad_id ON chat_messages(squad_id,id);
     CREATE TABLE IF NOT EXISTS rate_events (key TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS matchmaking_queue (user_id TEXT PRIMARY KEY REFERENCES users(id), state TEXT NOT NULL, queued_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS meeting_readiness (meeting_id TEXT NOT NULL REFERENCES meetings(id), user_id TEXT NOT NULL REFERENCES users(id), ready_at TEXT NOT NULL, PRIMARY KEY(meeting_id,user_id));
@@ -95,6 +99,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
   const adapter = aiAdapter === undefined ? configuredAIAdapter() : aiAdapter;
   const googleMeet = createGoogleMeetService({ db, now, config: googleMeetConfig, oauthClientFactory: googleOAuthClientFactory });
   const meetConfigured = typeof meetAdapter === 'function' || googleMeet.configured;
+  const videoRoom = createVideoRooms({ authorizeMember, meetingReadiness, members, now, rate });
   const aiPending = new Set();
   let closed = false;
   let inTransaction = false;
@@ -310,7 +315,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
       const past = meeting.endsAt <= stamp();
       return { ...meeting, meetUrl: past || (membership.active && readiness.allReady && readiness.status === 'ready') ? meeting.meetUrl : '', readiness };
     });
-    return { squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }), assignments: assignmentResults(row.sprint_id, m.id).filter(result => result.status === 'submitted').map(result => learning.accessByAssignment.get(result.week)?.unlocked ? result : { week: result.week, status: result.status, locked: true }) }; }), isMember: !!membership.active, canEdit };
+    return { chatUnread: membership.active ? q('SELECT COUNT(*) AS n FROM chat_messages WHERE squad_id=? AND user_id<>? AND id>COALESCE((SELECT last_id FROM chat_reads WHERE squad_id=? AND user_id=?),0)', squadId,user.id,squadId,user.id).n : 0, squad: summary(row), members: roster, meetings, googleMeet: connection, plan: learning.plan, learningProgress: learning.learningProgress, progress, teamProgress: roster.map(m => { const p = results(row.sprint_id, m.id, plan); return { userId: m.id, name: m.name, done: p.filter(x => x.status === 'done').length, total: p.length, results: p.map(result => learning.accessByTask.get(result.taskId)?.unlocked ? result : { ...result, note: '', url: '', locked: true }), assignments: assignmentResults(row.sprint_id, m.id).filter(result => result.status === 'submitted').map(result => learning.accessByAssignment.get(result.week)?.unlocked ? result : { week: result.week, status: result.status, locked: true }) }; }), isMember: !!membership.active, canEdit };
   }
   function assignmentResults(sprintId, userId) {
     return all('SELECT * FROM weekly_submissions WHERE sprint_id=? AND user_id=? ORDER BY week', sprintId, userId).map(saved => ({ week: saved.week, status: saved.status, text: saved.text, url: saved.url, checkedCriteria: JSON.parse(saved.checked), updatedAt: saved.updated_at }));
@@ -409,6 +414,46 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     if (method === 'DELETE' && pathname === '/api/google-meet/connection') {
       await googleMeet.disconnect(user.id);
       return json(res, 200, { ok: true });
+    }
+    const videoRoute = pathname.match(/^\/api\/squads\/([^/]+)\/meetings\/([^/]+)\/video\/(join|poll|ready|signal|leave)$/);
+    if (videoRoute && method === 'POST') {
+      const [, squadId, meetingId, action] = videoRoute;
+      return json(res, 200, await videoRoom({ squadId, meetingId, action, data, user }));
+    }
+    const chatRoute = pathname.match(/^\/api\/squads\/([^/]+)\/chat(?:\/(read))?$/);
+    if (chatRoute) {
+      const [, squadId, action] = chatRoute;
+      const { row, membership } = authorizeMember(squadId, user, method === 'POST');
+      if (!membership.active) throw new AppError(403, 'Chat is only available to current squad members.', 'forbidden');
+      const message = saved => ({ id: saved.id, userId: saved.user_id, name: profile(saved.user_id).name, text: saved.text, createdAt: saved.created_at, clientId: saved.user_id === user.id ? saved.client_id : undefined });
+      if (method === 'GET' && !action) {
+        const params = new URL(req.url, 'http://localhost').searchParams;
+        const before = params.get('before'), after = params.get('after');
+        if (before && after || [before, after].some(value => value !== null && (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))))) fail('Use one valid message cursor.');
+        const saved = after !== null ? all('SELECT * FROM chat_messages WHERE squad_id=? AND id>? ORDER BY id LIMIT 51', squadId, Number(after)) : all('SELECT * FROM chat_messages WHERE squad_id=? AND id<? ORDER BY id DESC LIMIT 51', squadId, before === null ? Number.MAX_SAFE_INTEGER : Number(before));
+        const page = saved.slice(0, 50);
+        if (after === null) page.reverse();
+        return json(res, 200, { messages: page.map(message), hasMore: saved.length > 50, canSend: unfinished.includes(row.status) });
+      }
+      if (method === 'POST' && !action) {
+        const text = textField(data.text, 2000, 'Message', true);
+        const clientId = textField(data.clientId, 80, 'Message identifier', true);
+        if (!/^[a-zA-Z0-9_-]{8,80}$/.test(clientId)) fail('Invalid message identifier.');
+        const existing = q('SELECT * FROM chat_messages WHERE squad_id=? AND user_id=? AND client_id=?', squadId, user.id, clientId);
+        if (existing) {
+          if (existing.text !== text) throw new AppError(409, 'This message identifier was already used. Start a new message.', 'duplicate_message');
+          return json(res, 200, { message: message(existing) });
+        }
+        rate(`chat:${user.id}`, 20, 60000);
+        const result = run('INSERT INTO chat_messages(squad_id,user_id,client_id,text,created_at) VALUES (?,?,?,?,?)', squadId, user.id, clientId, text, stamp());
+        return json(res, 201, { message: message(q('SELECT * FROM chat_messages WHERE id=?', Number(result.lastInsertRowid))) });
+      }
+      if (method === 'PUT' && action === 'read') {
+        if (!Number.isSafeInteger(data.lastId) || data.lastId < 0 || data.lastId > 0 && !q('SELECT id FROM chat_messages WHERE squad_id=? AND id=?', squadId, data.lastId)) fail('Invalid last read message.');
+        run('INSERT INTO chat_reads VALUES (?,?,?) ON CONFLICT(squad_id,user_id) DO UPDATE SET last_id=MAX(last_id,excluded.last_id)', squadId, user.id, data.lastId);
+        return json(res, 200, { ok: true });
+      }
+      throw new AppError(405, 'Method not allowed.', 'method_not_allowed');
     }
     const readinessRoute = pathname.match(/^\/api\/squads\/([^/]+)\/meetings\/([^/]+)\/(readiness|launch)$/);
     if (readinessRoute) {
@@ -669,7 +714,7 @@ export function createApp({ dbPath = process.env.DB_PATH || path.join(projectRoo
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
     try {
       const pathname = new URL(req.url, 'http://localhost').pathname;
       if (pathname.startsWith('/api/')) return await handleAPI(req, res, pathname);
