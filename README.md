@@ -2,7 +2,7 @@
 
 ## Live demo
 
-**[Open Zinlo](https://informative-educated-workstation-symbol.trycloudflare.com/)**
+**[Open Zinlo](https://price-oral-challenges-introduces.trycloudflare.com/)**
 
 If the original demo link is unavailable, use the link above. This is a temporary preview hosted from the project owner's computer; it is available while the server is running.
 
